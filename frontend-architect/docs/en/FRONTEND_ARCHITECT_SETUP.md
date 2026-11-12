@@ -55,8 +55,11 @@ Nothing comes turned on. The `permissions` rules apply to the main conversation 
 {
   "permissions": {
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Read(./**/.env.production)",
+      "Read(./**/.env.development)",
+      "Read(./**/.env.test)",
       "Bash(git push *)"
     ],
     "ask": [
@@ -73,7 +76,24 @@ Nothing comes turned on. The `permissions` rules apply to the main conversation 
 }
 ```
 
+Patterns starting with `./` apply from the folder where Claude Code was opened, including subfolders (monorepo). To apply in any folder, in `~/.claude/settings.json`, replace `./` with `//` (e.g. `Read(//**/.env)`); `**/.env` without a prefix is also relative to the current folder. `.env.example` is left out on purpose: the agent needs to read the variable names.
+
 Bash patterns are fragile (another path or `sh -c` escapes); test first. For large changes, use a separate worktree and review the diff; the frontmatter accepts `isolation: worktree` (it does not come turned on because it changes the integration flow). On native Windows there is no Bash sandbox.
+
+### 5.1 Hook that denies what the agent never does on its own
+
+The Backend Architect's hook serves here too. Save `architect-bash-guard.mjs` as it is in section 5.3 of the [Backend Architect SETUP](../../../backend-architect/docs/en/BACKEND_ARCHITECT_SETUP.md) and add to the installed agent's frontmatter:
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "node ~/.claude/hooks/architect-bash-guard.mjs"
+```
+
+On Windows, if `~` is not expanded by the hook's shell, use the absolute path. The hook also denies `npx playwright install` and `npm run dev`: for a browser test or a lab measurement, ask the caller to install the browser and start the server.
 
 ## 6. How to invoke
 

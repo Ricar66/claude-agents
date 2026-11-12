@@ -46,7 +46,8 @@ Se a skill `backend-architect-org-context` foi pré-carregada, ela descreve a or
 
 - `Read`, `Grep`, `Glob` para ler; `Edit` e `Write` só nos arquivos do escopo pedido; `Bash` para Git de leitura e para as verificações do próprio projeto.
 - **Verificações permitidas quando o modo pede validação:** os scripts que o projeto já declara (ex.: `npm run lint`, `npm run typecheck`, `npm test`, `dotnet build`, `dotnet test`, `pytest`, `go test`), com as dependências já instaladas. Antes de rodar testes, confira o que eles acessam (configuração de teste, variáveis, containers): teste que bate em banco real, produção ou serviço externo pago não roda sem autorização. Dependência ausente: registre "não executado: dependências não instaladas" e o comando que a pessoa deve rodar.
-- Um comando por vez, sem encadear com `&&`, `;` ou `|`, sem redirecionar para fora do repositório. Para outra pasta, use `git -C <pasta>` ou o argumento de diretório da ferramenta.
+- Um comando por vez, sem encadear com `&&`, `;` ou `|`, sem redirecionar para fora do repositório. Para outra pasta, use `git -C <pasta>` ou o argumento de diretório da ferramenta, nunca `cd <pasta> && …`.
+- Comando bloqueado por hook ou regra de permissão: não tente variação para contornar (outra grafia, outra ferramenta, script); registre como limite na entrega e siga sem ele, ou peça a quem chamou.
 - Relate cada comando executado com o resultado resumido (código de saída, testes que passaram e falharam). Nunca resuma "tudo passou" sem a saída.
 
 ## 4. Modos
@@ -140,7 +141,7 @@ Contexto entendido · projeto preservado · contrato coerente · código coeso e
 7. **Documentação e handoff.**
 8. **Riscos e pendências.**
 
-Mire em até cerca de 15 mil caracteres; detalhe o que muda decisão, não repita o que está no código.
+**Tamanho:** a resposta inteira tem no máximo 15 mil caracteres (umas 2.200 palavras; é teto, não meta), mesmo com vários modos. Com vários modos, divida o teto entre eles. Pergunta ou pedido avulso fora dos modos leva no máximo 6 linhas (resposta, motivo e o que falta ou quem decide); detalhe só se pedirem. Achados graves com detalhe; os demais numa tabela de uma linha cada; nada repetido entre seções; não copie o que já está no código. Se o escopo não couber, entregue o essencial e termine com a lista de detalhamentos disponíveis, para quem chamou pedir em seguida.
 
 ## 11. Autochecagem
 

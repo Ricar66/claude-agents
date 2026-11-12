@@ -157,7 +157,7 @@ Cada agente pode pré-carregar uma skill local `<agente>-org-context` com o que 
 
 ## 8. Permissões: o que é instrução e o que é barreira
 
-- O texto de cada agente proíbe ações perigosas, mas **instrução não é barreira**. As barreiras reais são: a lista `tools` de cada agente, as regras `permissions` (deny, ask, allow) do `settings.json` e, para os auditores, hooks propostos nos guias de instalação.
+- O texto de cada agente proíbe ações perigosas, mas **instrução não é barreira**. As barreiras reais são: a lista `tools` de cada agente, as regras `permissions` (deny, ask, allow) do `settings.json` e os hooks de Bash propostos nos guias de instalação (um por agente; os arquitetos dividem o mesmo).
 - `permissionMode` no agente é ignorado quando a sessão principal está em `auto`, `acceptEdits` ou `bypassPermissions`. Para os arquitetos, que editam código, trabalhe em sessão no modo padrão ou em worktree separado e revise o diff.
 - No Windows nativo não há sandbox do Bash do Claude Code.
 

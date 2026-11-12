@@ -157,7 +157,7 @@ Each agent can preload a local `<agent>-org-context` skill with what only your o
 
 ## 8. Permissions: what is an instruction and what is a barrier
 
-- Each agent's text forbids dangerous actions, but **an instruction is not a barrier**. The real barriers are: each agent's `tools` list, the `permissions` rules (deny, ask, allow) in `settings.json` and, for the auditors, the hooks proposed in the installation guides.
+- Each agent's text forbids dangerous actions, but **an instruction is not a barrier**. The real barriers are: each agent's `tools` list, the `permissions` rules (deny, ask, allow) in `settings.json` and the Bash hooks proposed in the installation guides (one per agent; the architects share the same one).
 - `permissionMode` in the agent is ignored when the main session is in `auto`, `acceptEdits` or `bypassPermissions`. For the architects, who edit code, work in a session in the default mode or in a separate worktree and review the diff.
 - On native Windows there is no Claude Code Bash sandbox.
 

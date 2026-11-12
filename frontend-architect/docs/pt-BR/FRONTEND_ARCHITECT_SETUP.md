@@ -55,8 +55,11 @@ Nada vem ativado. As regras de `permissions` valem para a conversa principal e p
 {
   "permissions": {
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Read(./**/.env.production)",
+      "Read(./**/.env.development)",
+      "Read(./**/.env.test)",
       "Bash(git push *)"
     ],
     "ask": [
@@ -73,7 +76,24 @@ Nada vem ativado. As regras de `permissions` valem para a conversa principal e p
 }
 ```
 
+Os padrões com `./` valem a partir da pasta onde o Claude Code foi aberto, inclusive subpastas (monorepo). Para valer em qualquer pasta, no `~/.claude/settings.json`, troque `./` por `//` (ex.: `Read(//**/.env)`); `**/.env` sem prefixo também é relativo à pasta atual. O `.env.example` fica de fora de propósito: o agente precisa ler os nomes das variáveis.
+
 Padrões de Bash são frágeis (outro caminho ou `sh -c` escapam); teste antes. Para mudanças grandes, use um worktree separado e revise o diff; o frontmatter aceita `isolation: worktree` (não vem ligado porque muda o fluxo de integração). No Windows nativo não há sandbox do Bash.
+
+### 5.1 Hook que barra o que o agente nunca faz sozinho
+
+O mesmo hook do Backend Architect serve aqui. Salve `architect-bash-guard.mjs` como está na seção 5.3 do [SETUP do Backend Architect](../../../backend-architect/docs/pt-BR/BACKEND_ARCHITECT_SETUP.md) e acrescente ao frontmatter do agente instalado:
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "node ~/.claude/hooks/architect-bash-guard.mjs"
+```
+
+No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto. O hook barra também `npx playwright install` e `npm run dev`: para teste de navegador ou medida de laboratório, peça a quem chamou que instale o navegador e suba o servidor.
 
 ## 6. Como invocar
 

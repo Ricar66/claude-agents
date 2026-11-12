@@ -60,8 +60,11 @@ Nothing here comes turned on. The `permissions` rules apply to the main conversa
 {
   "permissions": {
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Read(./**/.env.production)",
+      "Read(./**/.env.development)",
+      "Read(./**/.env.test)",
       "Read(./**/*.pem)",
       "Read(./**/*.key)",
       "Read(./**/*.pfx)",
@@ -83,11 +86,74 @@ Nothing here comes turned on. The `permissions` rules apply to the main conversa
 }
 ```
 
+Patterns starting with `./` apply from the folder where Claude Code was opened, including subfolders (monorepo). To apply in any folder, in `~/.claude/settings.json`, replace `./` with `//` (e.g. `Read(//**/.env)`); `**/.env` without a prefix is also relative to the current folder. `.env.example` is left out on purpose: the agent needs to read the variable names.
+
 Merge it into your `~/.claude/settings.json` or the project's `.claude/settings.json`. A limit from the documentation itself: Bash patterns that try to constrain arguments are fragile (the same program called by another path or inside `sh -c` escapes). Test first, because the rules also affect your normal use.
 
 ### 5.2 Isolated work
 
 For larger changes, run the agent in a separate worktree and review the diff before integrating. The frontmatter accepts `isolation: worktree`, which makes the agent always work on an isolated copy of the repository; it does not come turned on because it changes the flow (the changes stay in the worktree until you integrate them). On native Windows, Claude Code's Bash sandbox does not exist; strong isolation is a VM or a container.
+
+### 5.3 Hook that denies what the agent never does on its own
+
+Hooks can live in the subagent's frontmatter and only apply while it runs. Hooks of agents in `~/.claude/agents/` do not depend on the folder trust dialog; those in the project's `.claude/agents/` do. Unlike the Security Sentinel hook (a list of what is allowed), this one is a list of what is not: build, test, lint and project scripts follow the normal permission flow; chaining, `cd`, push, commit, package install, migration, network, deploy, server, file removal and reading a secret file are denied.
+
+**Proposal** (create and enable only if you want this layer; the same script serves the Frontend Architect):
+
+1. Save the script at `~/.claude/hooks/architect-bash-guard.mjs`:
+
+```js
+// PreToolUse (Bash) hook for backend-architect and frontend-architect.
+// Denies what these agents must never do on their own; everything else follows the normal permission flow.
+import { readFileSync } from "node:fs";
+
+const input = JSON.parse(readFileSync(0, "utf8"));
+const command = String(input?.tool_input?.command ?? "").trim();
+
+const deny = (reason) => {
+  process.stderr.write(`architect: command blocked (${reason}). Run one command at a time, without cd; if you need this, ask the user or the main Claude.\n`);
+  process.exit(2);
+};
+
+if (!command) deny("empty");
+if (/[;&|`\n\r]|\$\(|>|</.test(command)) deny("chaining, redirection or substitution");
+if (/^(cd|pushd|Set-Location)\b/i.test(command)) deny("changing folder (use git -C <folder> or the tool's folder argument)");
+
+const rules = [
+  [/^git( -C ("[^"]+"|\S+))? (push|commit|reset|checkout|switch|restore|stash|clean|rebase|merge|cherry-pick|revert|tag|am|apply)\b/, "Git that changes history or files"],
+  [/^git( -C ("[^"]+"|\S+))? (branch|remote) .*(-d|-D|--delete|add|set-url|remove|rm)\b/, "Git that changes a branch or remote"],
+  [/^(npm|pnpm|yarn|bun) (i|install|ci|add|remove|rm|uninstall|update|up|upgrade|publish|link|dlx)\b/, "package install or publish"],
+  [/^(npx|pnpx|bunx) (-y|--yes)\b/, "running a package downloaded on the fly"],
+  [/^npx (playwright|cypress) install\b/, "browser download"],
+  [/^(pip3?|uv|poetry|pipenv|conda) (install|add|remove|uninstall|update|sync|lock)\b|^python3? -m pip\b/, "Python package install"],
+  [/^dotnet (add|remove|restore|tool|workload|nuget)\b/, ".NET package"],
+  [/^(cargo (add|install|publish|update)|go (get|install)|gem install|composer (require|install|update))\b/, "package install"],
+  [/prisma (migrate (deploy|reset|dev)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/, "migration or database change"],
+  [/^(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm|ssh|scp|sftp|rsync|nc|ncat|nmap|ping|telnet|ftp|tracert|traceroute|Test-NetConnection)\b/i, "network"],
+  [/^(docker|podman|kubectl|helm|terraform|tofu|systemctl|service|sc|pm2|nssm|vercel|netlify|fly|railway|heroku|az|aws|gcloud)\b/i, "deploy, container, cluster, cloud or service"],
+  [/^(npm|pnpm|yarn|bun) (run )?(dev|start|serve|preview|deploy|release)\b/, "server or deploy"],
+  [/^(rm|del|erase|rmdir|rd|Remove-Item|shred)\b/i, "file removal (use Edit or Write; delete only on request)"],
+  [/(^|\s)(cat|type|more|less|head|tail|Get-Content|gc|bat|strings|xxd)\b.*(\.env(\.(?!example)[\w.-]+)?\b(?!\.example)|\.pem\b|\.key\b|\.pfx\b|\.p12\b|id_rsa|id_ed25519)/i, "reading a secret file"],
+  [/^(env|printenv|set)$|^Get-ChildItem Env:/i, "environment variables (may hold secrets)"],
+];
+for (const [re, reason] of rules) if (re.test(command)) deny(reason);
+process.exit(0);
+```
+
+2. Add to the installed agent's frontmatter:
+
+```yaml
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "node ~/.claude/hooks/architect-bash-guard.mjs"
+```
+
+On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
+
+Effect: commit, push, install and migration become requests to the user or the main Claude. Tested with 63 fictitious commands (20 allowed, 43 denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 

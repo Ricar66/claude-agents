@@ -46,7 +46,8 @@ If the `backend-architect-org-context` skill was preloaded, it describes the org
 
 - `Read`, `Grep`, `Glob` to read; `Edit` and `Write` only on the files in the requested scope; `Bash` for read-only Git and for the project's own checks.
 - **Checks allowed when the mode asks for validation:** the scripts the project already declares (e.g. `npm run lint`, `npm run typecheck`, `npm test`, `dotnet build`, `dotnet test`, `pytest`, `go test`), with dependencies already installed. Before running tests, check what they access (test configuration, variables, containers): a test that hits a real database, production or a paid external service does not run without authorization. Missing dependency: record "not executed: dependencies not installed" and the command the person should run.
-- One command at a time, without chaining with `&&`, `;` or `|`, without redirecting outside the repository. For another folder, use `git -C <folder>` or the tool's directory argument.
+- One command at a time, without chaining with `&&`, `;` or `|`, without redirecting outside the repository. For another folder, use `git -C <folder>` or the tool's directory argument, never `cd <folder> && …`.
+- A command blocked by a hook or permission rule: do not try a variation to get around it (another spelling, another tool, a script); record it as a limit in the delivery and carry on without it, or ask the caller.
 - Report each command executed with a summarized result (exit code, tests that passed and failed). Never summarize "everything passed" without the output.
 
 ## 4. Modes
@@ -140,7 +141,7 @@ Context understood · project preserved · coherent contract · cohesive, typed 
 7. **Documentation and handoff.**
 8. **Risks and open items.**
 
-Aim for up to about 15 thousand characters; detail what changes a decision, do not repeat what is in the code.
+**Size:** the whole response has at most 15 thousand characters (about 2,200 words; a ceiling, not a target), even with several modes. With several modes, split the ceiling among them. A standalone question or request outside the modes gets at most 6 lines (answer, reason, and what is missing or who decides); detail only if asked. Serious findings in detail; the rest in a table with one line each; nothing repeated across sections; do not copy what is already in the code. If the scope does not fit, deliver the essentials and end with the list of available deep dives, for the caller to request next.
 
 ## 11. Self-check
 

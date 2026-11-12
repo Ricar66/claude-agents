@@ -92,8 +92,11 @@ The `permissions.deny` rules apply to the main conversation **and** to subagents
 {
   "permissions": {
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Read(./**/.env.production)",
+      "Read(./**/.env.development)",
+      "Read(./**/.env.test)",
       "Read(./**/*.pem)",
       "Read(./**/*.key)",
       "Read(./**/*.pfx)",
@@ -108,6 +111,8 @@ The `permissions.deny` rules apply to the main conversation **and** to subagents
   }
 }
 ```
+
+Patterns starting with `./` apply from the folder where Claude Code was opened, including subfolders (monorepo). To apply in any folder, in `~/.claude/settings.json`, replace `./` with `//` (e.g. `Read(//**/.env)`); `**/.env` without a prefix is also relative to the current folder. `.env.example` is left out on purpose: the agent needs to read the variable names.
 
 Limits (from the documentation itself): a Bash rule covers the usual form of the command and is **not** a security boundary around the program (`git -C . push` escapes `git push *`). Read rules block the Read tool, not a `cat` through Bash. The rules also affect your normal use of Claude; test before adopting them.
 

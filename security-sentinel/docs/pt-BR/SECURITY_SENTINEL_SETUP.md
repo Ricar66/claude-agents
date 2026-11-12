@@ -92,8 +92,11 @@ As regras `permissions.deny` valem para a conversa principal **e** para os subag
 {
   "permissions": {
     "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.local)",
+      "Read(./**/.env.production)",
+      "Read(./**/.env.development)",
+      "Read(./**/.env.test)",
       "Read(./**/*.pem)",
       "Read(./**/*.key)",
       "Read(./**/*.pfx)",
@@ -108,6 +111,8 @@ As regras `permissions.deny` valem para a conversa principal **e** para os subag
   }
 }
 ```
+
+Os padrões com `./` valem a partir da pasta onde o Claude Code foi aberto, inclusive subpastas (monorepo). Para valer em qualquer pasta, no `~/.claude/settings.json`, troque `./` por `//` (ex.: `Read(//**/.env)`); `**/.env` sem prefixo também é relativo à pasta atual. O `.env.example` fica de fora de propósito: o agente precisa ler os nomes das variáveis.
 
 Limites (da própria documentação): regra de Bash cobre a forma usual do comando e **não** é fronteira de segurança em volta do programa (`git -C . push` escapa de `git push *`). Regras de Read bloqueiam a ferramenta Read, não um `cat` pelo Bash. As regras afetam também o seu uso normal do Claude; teste antes.
 

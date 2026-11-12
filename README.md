@@ -2,6 +2,8 @@
 
 **English** · [Português](README.pt-BR.md)
 
+![claude-agents: four subagents for Claude Code, two auditors that only read and two architects that design and implement on request](assets/banner.svg)
+
 A collection of subagents for [Claude Code](https://code.claude.com/docs/en/sub-agents), each with a ready-to-install agent, documentation, evaluations and a way to receive your organization's context without that context entering the repository.
 
 ## Agents
@@ -10,7 +12,6 @@ A collection of subagents for [Claude Code](https://code.claude.com/docs/en/sub-
 |---|---|---|
 | [`security-sentinel`](security-sentinel/) | Read-only, evidence-based security audit: code, APIs, network (via files), infrastructure, supply chain, CI and AI systems (LLM, agents, MCP, RAG). Eleven modes, from `triage` to `release-gate` | Initial (v0.1) |
 | [`infra-guardian`](infra-guardian/) | Read-only infrastructure and reliability review (SRE, DevOps, platform, databases, FinOps): VPS, Docker, Kubernetes, IaC, network, CI/CD, observability, backup and DR, capacity, incidents and cost. Seventeen modes, from `discover` to `verify-change`; it never applies changes, it delivers plans with rollback. Comes with a `static` variant without Bash | Initial (v0.1) |
-
 | [`backend-architect`](backend-architect/) | Backend architect and engineer: APIs, domain rules, databases, integrations, migrations and tests. Reads the whole repository before proposing, preserves what works and **implements when asked**. Fifteen modes, from `discover` to `verify` | Initial (v0.1) |
 | [`frontend-architect`](frontend-architect/) | Frontend architect and engineer: UX, design system, accessibility (WCAG 2.2 AA), responsiveness, rendering, performance and tests. Follows the existing visual identity and **implements when asked**. Seventeen modes | Initial (v0.1) |
 
