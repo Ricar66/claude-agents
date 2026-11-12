@@ -1,0 +1,23 @@
+# Contexto organizacional real e relatórios de auditoria ficam FORA do repositório público.
+# Organizational context and audit reports stay OUT of the public repository.
+*-org-context/
+*.local.md
+relatorios/
+reports/
+
+# Segredos / secrets
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Sistema / OS
+.DS_Store
+Thumbs.db
+node_modules/
+
+# Estado local de ferramentas (pode conter caminhos da máquina) / local tool state (may contain machine paths)
+.omc/
+.claude/
