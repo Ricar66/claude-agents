@@ -107,9 +107,10 @@ Hooks podem ficar no frontmatter do subagente e só valem enquanto ele roda. Hoo
 // Barra o que esses agentes nunca podem fazer sozinhos; o resto segue o fluxo normal de permissão.
 // O comando é dividido como o bash faria, sem expandir nada, e o que o bash expandiria é recusado;
 // a checagem roda sobre os argumentos reais, com o nome do programa normalizado. Qualquer erro também nega.
-// É uma lista do que não pode: barra o acidente e o comando injetado comum, não é fronteira de segurança
-// (o agente edita código e roda testes, então pode executar código do projeto).
-import { readFileSync } from "node:fs";
+// Git só com subcomandos de leitura; o resto é lista do que não pode: barra o acidente e o comando injetado
+// comum, não é fronteira de segurança (o agente edita código e roda testes, então pode executar código do projeto).
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 const negar = (motivo) => {
   process.stderr.write(`architect: comando bloqueado (${motivo}). Rode um comando por vez, sem cd; se precisar disso, peça ao usuário ou ao Claude principal.\n`);
@@ -159,30 +160,69 @@ function dividir(s) {
   return args;
 }
 
-// Nome do programa sem pasta, sem extensão do Windows e em minúsculas.
-const nomeDe = (p) => p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "");
-// Argumentos antes do "--" (depois dele, tudo é dado do programa).
-const antesDoFim = (a) => (a.includes("--") ? a.slice(0, a.indexOf("--")) : a);
-const palavras = (a) => antesDoFim(a).filter((x) => !x.startsWith("-"));
+// Nome do programa: sem pasta, sem extensão do Windows, em minúsculas e sem versão no fim (python3.12 vira python).
+function nomeDe(p) {
+  const n = p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  return n === "nodejs" ? "node" : n;
+}
+
+// Arquivo de segredo. Normaliza como o Windows (maiúsculas, ponto ou espaço no fim, :fluxo alternativo)
+// e olha também o caminho de <revisão>:<caminho> e de --opcao=<caminho>.
+function ehSegredo(arg) {
+  const m = String(arg).toLowerCase();
+  if (/credenciais|credentials/.test(m) || /(^|[\\/])\.ssh([\\/]|$)/.test(m)) return true;
+  const base = (x) => x.replace(/^.*[\\/]/, "");
+  const candidatos = [base(m).split(":")[0]];
+  if (m.includes(":")) candidatos.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes("=")) candidatos.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
+  return candidatos.some((c0) => {
+    const c = c0.replace(/[. ]+$/, "");
+    return c === ".env"
+      || (c.startsWith(".env.") && !/^\.env\.(example|sample|template|dist)$/.test(c))
+      || /\.(pem|key|pfx|p12)$/.test(c)
+      || /^id_(rsa|ed25519|ecdsa|dsa)$/.test(c)
+      || /^(senha|password)[^\\/]*\.txt$/.test(c);
+  });
+}
+
+// Palavras (argumentos que não são opção). Para no "--" só quando ele vem depois de um subcomando que roda
+// script ou programa (o resto é argumento desse script); fora disso o "--" não esconde nada.
+function palavrasAte(a, rodaCoisas) {
+  const out = [];
+  for (const x of a) {
+    if (x === "--") { if (out.some((w) => rodaCoisas.has(w))) break; continue; }
+    if (!x.startsWith("-")) out.push(x);
+  }
+  return out;
+}
 
 const PASTA = new Set(["cd", "pushd", "popd", "set-location", "sl", "chdir"]);
 const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh", "wsl", "busybox",
   "env", "sudo", "doas", "su", "runas", "xargs", "nohup", "timeout", "nice", "ionice", "stdbuf", "command", "builtin", "exec",
   "eval", "source", ".", "time", "watch", "start", "start-process", "invoke-expression", "iex", "invoke-command", "icm", "script",
-  "parallel", "setsid", "chroot", "unshare", "flock", "strace"]);
+  "parallel", "setsid", "chroot", "unshare", "flock", "strace", "cross-env", "dotenv", "concurrently"]);
+const BAIXA_SEMPRE = new Set(["pnpx", "uvx", "pipx", "corepack"]);
 const CODIGO_NA_LINHA = {
-  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:/,
+  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:|^--(import|loader|experimental-loader|require)=(data|https?):/,
   bun: /^(-e|--eval|-p|--print)$|^--(eval|print)=/,
-  python: /^-[A-Za-z]*c/, python3: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
+  python: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
   ruby: /^-[A-Za-z]*e/, perl: /^-[A-Za-z]*[eE]/, php: /^-r$/, lua: /^-e$/, rscript: /^-e$/, osascript: /^-e$/,
 };
-const GIT_PROIBIDOS = new Set(["push", "commit", "reset", "checkout", "switch", "restore", "stash", "clean", "rebase", "merge",
-  "cherry-pick", "revert", "am", "apply", "fetch", "pull", "clone", "ls-remote", "submodule", "worktree", "update-ref",
-  "filter-branch", "filter-repo", "notes", "replace", "gc", "prune", "send-email", "rm"]);
-const INSTALA = new Set(["i", "install", "ci", "it", "cit", "install-test", "install-ci-test", "add", "remove", "rm", "uninstall",
-  "un", "update", "up", "upgrade", "publish", "link", "ln", "unlink"]);
-const BAIXA_E_RODA = new Set(["exec", "x", "dlx", "create", "init"]);
-const SERVIDOR = new Set(["dev", "start", "serve", "preview", "deploy", "release"]);
+const GIT_LEITURA = new Set(["status", "diff", "log", "show", "blame", "ls-files", "ls-tree", "rev-parse", "merge-base", "cat-file",
+  "describe", "shortlog", "grep", "for-each-ref", "rev-list", "name-rev", "check-ignore", "check-attr", "count-objects", "version"]);
+const GIT_PERIGOSAS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv",
+  "--open-files-in-pager", "--filters"];
+const EXATAS_SEGURAS = new Set(["--text"]);
+// Apelidos do npm e equivalentes do pnpm, yarn e bun que instalam, removem, publicam ou mexem em conta e registro.
+const PACOTE_PROIBIDO = new Set(["i", "in", "ins", "inst", "insta", "instal", "install", "isnt", "isnta", "isntal", "isntall", "add",
+  "ci", "clean-install", "ic", "install-clean", "isntall-clean", "it", "install-test", "cit", "clean-install-test", "sit",
+  "install-ci-test", "uninstall", "unlink", "remove", "rm", "r", "un", "update", "up", "upgrade", "udpate", "publish", "unpublish",
+  "link", "ln", "dedupe", "ddp", "prune", "rebuild", "rb", "import", "dlx", "create", "init", "explore", "edit", "login", "logout",
+  "adduser", "add-user", "token", "owner", "access", "deprecate", "dist-tag", "team", "org", "star", "unstar", "hook", "profile"]);
+const VALOR_PM = new Set(["--prefix", "-C", "--dir", "--cwd", "--filter", "-F", "--workspace", "--userconfig", "--globalconfig",
+  "--cache", "--registry", "--loglevel", "--reporter"]);
+const RODA_SCRIPT = new Set(["run", "run-script", "rum", "urn", "test", "t", "tst", "exec", "x"]);
+const SERVIDOR = new Set(["dev", "start", "restart", "stop", "serve", "preview", "deploy", "release"]);
 const REDE = new Set(["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "ssh", "scp", "sftp", "rsync", "nc",
   "ncat", "netcat", "socat", "nmap", "ping", "telnet", "ftp", "tracert", "traceroute", "test-netconnection", "tnc", "openssl",
   "nslookup", "dig", "host", "gh", "hub", "glab"]);
@@ -190,18 +230,26 @@ const NUVEM = new Set(["docker", "docker-compose", "podman", "kubectl", "helm", 
   "ansible", "ansible-playbook", "systemctl", "service", "sc", "pm2", "nssm", "vercel", "netlify", "fly", "flyctl", "railway",
   "heroku", "az", "aws", "gcloud", "gsutil", "firebase", "wrangler", "supabase"]);
 const REMOVE = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "ri", "shred", "unlink"]);
-const LEITORES = new Set(["cat", "type", "more", "less", "head", "tail", "get-content", "gc", "bat", "strings", "xxd", "od",
-  "hexdump", "base64", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "awk", "gawk", "sed", "cut", "sort",
-  "uniq", "diff", "cmp", "cp", "copy", "copy-item", "mv", "move", "move-item"]);
+const SO_LISTA = new Set(["ls", "dir", "get-childitem", "gci", "stat", "test", "which", "where", "command"]);
 const MIGRACAO = /prisma (migrate (deploy|reset|dev|resolve)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/;
 
-function ehSegredo(arg) {
-  const b = arg.replace(/^.*[\\/]/, "");
-  if (b === ".env") return true;
-  if (/^\.env\./i.test(b) && !/^\.env\.(example|sample|template|dist)$/i.test(b)) return true;
-  if (/\.(pem|key|pfx|p12)$/i.test(b)) return true;
-  if (/^id_(rsa|ed25519|ecdsa|dsa)$/i.test(b)) return true;
-  if (/(^|[\\/])\.ssh([\\/]|$)/.test(arg) || /credenciais|credentials/i.test(arg) || /^(senha|password)[^\\/]*\.txt$/i.test(b)) return true;
+let CWD = process.cwd();
+
+// Nega opção longa perigosa, inclusive abreviada (o git aceita prefixo único). Para no "--".
+function verificarOpcoes(args, perigosas) {
+  for (const a of args) {
+    if (a === "--") return;
+    if (!a.startsWith("--")) continue;
+    const nome = a.split("=")[0];
+    if (nome.length > 2 && !EXATAS_SEGURAS.has(nome) && perigosas.some((p) => p.startsWith(nome))) negar("opção que executa ou grava");
+  }
+}
+
+// O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
+function mostraConteudo(sub, r) {
+  if (["blame", "cat-file", "grep"].includes(sub)) return true;
+  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
+  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
   return false;
 }
 
@@ -214,20 +262,72 @@ function verificarGit(a) {
   }
   const sub = a[i];
   const r = a.slice(i + 1);
-  if (GIT_PROIBIDOS.has(sub)) negar("Git que altera histórico, arquivos ou remoto, ou usa rede");
-  if (sub === "branch" && r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))) negar("Git que altera branch ou remoto");
-  if (sub === "remote" && r.some((x) => ["add", "set-url", "remove", "rm", "rename", "set-head", "prune", "update", "set-branches"].includes(x))) negar("Git que altera branch ou remoto");
-  if (sub === "tag" && !(r.length === 0 || r.includes("-l") || r.includes("--list"))) negar("Git que altera histórico ou arquivos");
-  if (sub === "config" && !r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x))) negar("git config que grava");
+  if (sub === undefined) return;
+  const pos = r.filter((x) => !x.startsWith("-"));
+  let ok = GIT_LEITURA.has(sub);
+  if (sub === "branch") ok = !r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))
+    && (pos.length === 0 || r.some((x) => /^(--list|-l|-a|--all|-r|--remotes|-v|-vv|--contains|--no-contains|--merged|--no-merged|--points-at)/.test(x)));
+  if (sub === "tag") ok = !r.some((x) => /^(-a|-s|-u|-f|-d|-m|-F|--annotate|--sign|--local-user|--force|--delete|--message|--file)/.test(x))
+    && (pos.length === 0 || r.some((x) => /^(--list|-l|--contains|--no-contains|--merged|--no-merged|--points-at|-n)/.test(x)));
+  if (sub === "remote") ok = r.length === 0 || (r.length === 1 && r[0] === "-v") || r[0] === "get-url";
+  if (sub === "config") ok = r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x));
+  if (sub === "stash" || sub === "worktree") ok = r[0] === "list";
+  if (sub === "reflog") ok = r[0] === undefined || r[0] === "show" || (r[0].startsWith("-") && !r.includes("expire") && !r.includes("delete"));
+  if (!ok) negar("Git fora da lista de leitura (commit, push, checkout e afins ficam com o usuário)");
+  verificarOpcoes(r, GIT_PERIGOSAS);
+  if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) negar("opção que executa ou grava");
+  if (mostraConteudo(sub, r) && r.some(ehSegredo)) negar("leitura de arquivo de segredo");
 }
 
-// npx, bunx, npm exec, pnpm exec: nega pacote baixado na hora e confere o comando de dentro.
-function verificarExecutor(a) {
+// O pacote está no node_modules/.bin desta pasta ou de uma pasta acima?
+function binLocal(pacote) {
+  const bin = pacote.replace(/^@[^/]+\//, "");
+  if (!/^[\w.-]+$/.test(bin)) return false;
+  let d = CWD;
+  for (let k = 0; k < 40; k++) {
+    for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", bin + ext))) return true;
+    const pai = dirname(d);
+    if (pai === d) break;
+    d = pai;
+  }
+  return false;
+}
+
+// npx, bunx, npm exec, bun x (podem baixar) e pnpm exec, yarn exec (só local): confere o pacote e o comando de dentro.
+function verificarExecutor(a, soLocal) {
   if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) negar("execução de pacote baixado na hora ou de comando embutido");
+  const semInstalar = a.some((x) => x === "--no" || x === "--no-install");
   const i = a.findIndex((x) => !x.startsWith("-"));
   if (i < 0) return;
-  if ((a[i] === "playwright" || a[i] === "cypress") && a[i + 1] === "install") negar("download de navegador");
+  const pacote = a[i];
+  if (/^.+@/.test(pacote)) negar("pacote com versão, baixado na hora");
+  if ((pacote === "playwright" || pacote === "cypress") && a[i + 1] === "install") negar("download de navegador");
+  if (!soLocal && !semInstalar && !binLocal(pacote)) negar("pacote fora do node_modules do projeto seria baixado na hora (use npx --no ou peça ao usuário)");
   verificar(a.slice(i));
+}
+
+// pip, uv, poetry e afins: "run" executa o que vem depois; o resto é conferido palavra por palavra.
+function verificarSufixos(a) {
+  for (let k = 0; k < a.length; k++) if (!a[k].startsWith("-")) verificar(a.slice(k));
+}
+
+function verificarGerenciador(prog, a) {
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) i += VALOR_PM.has(a[i]) ? 2 : 1;
+  const sub = a[i];
+  if (sub === undefined) {
+    if (prog === "yarn" && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) negar("instalação ou publicação de pacote");
+    return;
+  }
+  if (sub === "exec" || (sub === "x" && prog !== "yarn")) return verificarExecutor(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  const pal = palavrasAte(a, RODA_SCRIPT);
+  if (pal.some((x) => PACOTE_PROIBIDO.has(x))) negar("instalação, publicação de pacote ou conta no registro");
+  if (pal.includes("audit") && pal.includes("fix")) negar("instalação ou publicação de pacote");
+  if (pal.includes("version") && pal.length > pal.indexOf("version") + 1) negar("npm version cria commit e tag");
+  if (pal.includes("config") && pal.some((x) => ["set", "delete", "edit"].includes(x))) negar("configuração do gerenciador de pacotes");
+  if (prog === "yarn" && pal.includes("set")) negar("instalação ou publicação de pacote");
+  const script = ["run", "run-script", "rum", "urn"].includes(sub) ? a.slice(i + 1).find((x) => !x.startsWith("-")) : sub;
+  if (SERVIDOR.has(script)) negar("servidor ou deploy");
 }
 
 function verificar(argv) {
@@ -235,48 +335,55 @@ function verificar(argv) {
   if (argv[0].includes("=")) negar("variável de ambiente antes do comando");
   const prog = nomeDe(argv[0]);
   const a = argv.slice(1);
-  const pal = palavras(a);
   const texto = [prog, ...a].join(" ");
 
   if (PASTA.has(prog)) negar("mudar de pasta (use git -C <pasta> ou o argumento de pasta da ferramenta)");
   if (prog === "command" && a.length === 2 && (a[0] === "-v" || a[0] === "-V")) return; // só diz se o programa existe
   if (SHELLS.has(prog)) negar("shell ou comando que embrulha outro (rode o comando direto)");
+  if (BAIXA_SEMPRE.has(prog)) negar("execução de pacote baixado na hora");
   if (prog === "printenv" || ((prog === "set" || prog === "export" || prog === "declare" || prog === "typeset") && (a.length === 0 || a.includes("-p")))) negar("variáveis de ambiente (podem ter segredo)");
   if (["get-childitem", "gci", "dir", "ls", "get-item", "gi"].includes(prog) && a.some((x) => /^env:/i.test(x))) negar("variáveis de ambiente (podem ter segredo)");
-  if (CODIGO_NA_LINHA[prog] && antesDoFim(a).some((x) => CODIGO_NA_LINHA[prog].test(x))) negar("código na linha de comando (use um arquivo do projeto ou peça ao usuário)");
-  if (prog === "deno" && (pal[0] === "eval" || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) negar("código na linha de comando ou baixado na hora");
+  if (CODIGO_NA_LINHA[prog] && a.some((x) => CODIGO_NA_LINHA[prog].test(x))) negar("código na linha de comando (use um arquivo do projeto ou peça ao usuário)");
+  if (prog === "deno" && (a.includes("eval") || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) negar("código na linha de comando ou baixado na hora");
+  if (prog === "git") return verificarGit(a);
+  if (!SO_LISTA.has(prog) && a.some(ehSegredo)) negar("leitura de arquivo de segredo");
 
-  if (["npx", "pnpx", "bunx"].includes(prog)) return verificarExecutor(a);
-  if (["uvx", "pipx"].includes(prog)) negar("execução de pacote baixado na hora");
-  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) {
-    const p = a.findIndex((x) => !x.startsWith("-"));
-    if (p >= 0 && (a[p] === "exec" || a[p] === "x")) return verificarExecutor(a.slice(p + 1));
-    if (prog === "yarn" && pal.length === 0 && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) negar("instalação ou publicação de pacote");
-    if (pal.some((x) => INSTALA.has(x)) || (pal.includes("audit") && pal.includes("fix"))) negar("instalação ou publicação de pacote");
-    if (pal[0] === "version" && pal.length > 1) negar("npm version cria commit e tag");
-    if (pal.some((x) => BAIXA_E_RODA.has(x))) negar("execução de pacote baixado na hora");
-    if (pal.some((x) => SERVIDOR.has(x))) negar("servidor ou deploy");
+  if (prog === "npx" || prog === "bunx") return verificarExecutor(a, false);
+  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) return verificarGerenciador(prog, a);
+  if (prog === "python" || prog === "py" || prog === "pythonw") {
+    for (let k = 0; k < a.length; k++) {
+      const x = a[k];
+      if (!x.startsWith("-") || x === "-") break;
+      if (/^-[A-Za-z]*[WX]$/.test(x)) { k++; continue; }
+      const m = /^-[A-Za-z]*m(.*)$/.exec(x);
+      if (m) { if (["pip", "ensurepip"].includes(m[1] || a[k + 1])) negar("instalação de pacote Python"); break; }
+    }
   }
-  if (["pip", "pip3", "uv", "poetry", "pipenv", "conda"].includes(prog) && pal.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) negar("instalação de pacote Python");
-  if (["python", "python3", "py"].includes(prog)) {
-    const m = a.findIndex((x) => /^-[A-Za-z]*m$/.test(x));
-    if (m >= 0 && ["pip", "ensurepip"].includes(a[m + 1])) negar("instalação de pacote Python");
+  if (["pip", "uv", "poetry", "pipenv", "conda", "pdm", "hatch", "rye"].includes(prog)) {
+    const pal = palavrasAte(a, new Set(["run"]));
+    if (pal[0] === "run") {
+      if (a.some((x) => /^--with/.test(x))) negar("execução de pacote baixado na hora");
+      verificarSufixos(a.slice(a.indexOf("run") + 1));
+    } else if (pal.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) negar("instalação de pacote Python");
   }
-  if (prog === "dotnet" && ["add", "remove", "restore", "tool", "workload", "nuget"].includes(pal[0])) negar("pacote .NET");
-  if (prog === "go" && pal[0] === "run" && pal.some((x) => x.includes("@"))) negar("execução de pacote baixado na hora");
-  if ((prog === "cargo" && ["add", "install", "publish", "update"].includes(pal[0])) || (prog === "go" && ["get", "install"].includes(pal[0]))
-    || (prog === "gem" && pal[0] === "install") || (prog === "composer" && ["require", "install", "update"].includes(pal[0]))) negar("instalação de pacote");
+  if (prog === "dotnet") {
+    const pal = palavrasAte(a, new Set(["run", "test", "exec"]));
+    if (pal[0] !== "ef" && pal.some((x) => ["add", "remove", "restore", "tool", "workload", "nuget"].includes(x))) negar("pacote .NET");
+  }
+  if (prog === "go" && palavrasAte(a, new Set()).some((x, k, p) => (["get", "install"].includes(x)) || (p[0] === "run" && x.includes("@")))) negar("instalação de pacote ou pacote baixado na hora");
+  if (prog === "cargo" && palavrasAte(a, new Set(["run", "test"])).some((x) => ["add", "install", "publish", "update"].includes(x))) negar("instalação de pacote");
+  if (prog === "gem" && palavrasAte(a, new Set(["exec"])).includes("install")) negar("instalação de pacote");
+  if (prog === "composer" && palavrasAte(a, new Set(["run", "run-script", "exec"])).some((x) => ["require", "install", "update"].includes(x))) negar("instalação de pacote");
   if (MIGRACAO.test(texto)) negar("migração ou alteração de banco");
   if (REDE.has(prog)) negar("rede");
   if (NUVEM.has(prog)) negar("deploy, container, cluster, nuvem ou serviço");
   if (REMOVE.has(prog)) negar("remoção de arquivo (use Edit ou Write; apagar só com pedido)");
   if (prog === "find" && a.some((x) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(x))) negar("find que apaga, executa ou grava");
-  if (LEITORES.has(prog) && a.some(ehSegredo)) negar("leitura de arquivo de segredo");
-  if (prog === "git") verificarGit(a);
 }
 
 try {
   const entrada = JSON.parse(readFileSync(0, "utf8"));
+  if (typeof entrada?.cwd === "string" && entrada.cwd) CWD = entrada.cwd;
   const bruto = entrada?.tool_input?.command;
   if (typeof bruto !== "string") negar("entrada sem comando em texto");
   const comando = bruto.trim();
@@ -301,7 +408,7 @@ hooks:
 
 No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/architect-bash-guard.mjs`).
 
-Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio; qualquer erro dentro dele nega o comando. Testado com 148 comandos fictícios (41 liberados, 107 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
+Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, versão no nome (`python3.12`), opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio. No git só passam subcomandos de leitura, e nenhum que mostre o conteúdo de um arquivo de segredo (`git show HEAD:.env`). O `npx` (e `npm exec`, `bunx`) só roda pacote que já está no `node_modules/.bin` do projeto, ou com `--no`: sem terminal, o npx baixaria o pacote sem perguntar. Qualquer erro dentro do script nega o comando. Testado com 220 comandos fictícios (58 liberados, 162 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
 
 ## 6. Como invocar
 

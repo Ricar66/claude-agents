@@ -107,9 +107,10 @@ Hooks can live in the subagent's frontmatter and only apply while it runs. Hooks
 // Denies what these agents must never do on their own; everything else follows the normal permission flow.
 // The command is split the way bash would split it, without expanding anything, and whatever bash would expand is refused;
 // the check runs on the real arguments, with the program name normalized. Any error also denies.
-// It is a list of what is not allowed: it stops accidents and common injected commands, it is not a security boundary
-// (the agent edits code and runs tests, so it can run project code).
-import { readFileSync } from "node:fs";
+// Git only with read-only subcommands; the rest is a list of what is not allowed: it stops accidents and common
+// injected commands, it is not a security boundary (the agent edits code and runs tests, so it can run project code).
+import { readFileSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
 
 const deny = (reason) => {
   process.stderr.write(`architect: command blocked (${reason}). Run one command at a time, without cd; if you need this, ask the user or the main Claude.\n`);
@@ -159,30 +160,69 @@ function split(s) {
   return args;
 }
 
-// Program name without folder, without Windows extension, in lowercase.
-const nameOf = (p) => p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "");
-// Arguments before "--" (after it, everything is data for the program).
-const beforeEnd = (a) => (a.includes("--") ? a.slice(0, a.indexOf("--")) : a);
-const words = (a) => beforeEnd(a).filter((x) => !x.startsWith("-"));
+// Program name: without folder, without Windows extension, in lowercase and without a trailing version (python3.12 becomes python).
+function nameOf(p) {
+  const n = p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  return n === "nodejs" ? "node" : n;
+}
+
+// Secret file. Normalizes like Windows (case, trailing dot or space, :alternate stream)
+// and also looks at the path in <revision>:<path> and in --option=<path>.
+function isSecret(arg) {
+  const m = String(arg).toLowerCase();
+  if (/credenciais|credentials/.test(m) || /(^|[\\/])\.ssh([\\/]|$)/.test(m)) return true;
+  const base = (x) => x.replace(/^.*[\\/]/, "");
+  const candidates = [base(m).split(":")[0]];
+  if (m.includes(":")) candidates.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes("=")) candidates.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
+  return candidates.some((c0) => {
+    const c = c0.replace(/[. ]+$/, "");
+    return c === ".env"
+      || (c.startsWith(".env.") && !/^\.env\.(example|sample|template|dist)$/.test(c))
+      || /\.(pem|key|pfx|p12)$/.test(c)
+      || /^id_(rsa|ed25519|ecdsa|dsa)$/.test(c)
+      || /^(senha|password)[^\\/]*\.txt$/.test(c);
+  });
+}
+
+// Words (arguments that are not options). Stops at "--" only when it comes after a subcommand that runs
+// a script or program (the rest are that script's arguments); otherwise "--" hides nothing.
+function wordsUntil(a, runsThings) {
+  const out = [];
+  for (const x of a) {
+    if (x === "--") { if (out.some((w) => runsThings.has(w))) break; continue; }
+    if (!x.startsWith("-")) out.push(x);
+  }
+  return out;
+}
 
 const FOLDER = new Set(["cd", "pushd", "popd", "set-location", "sl", "chdir"]);
 const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh", "wsl", "busybox",
   "env", "sudo", "doas", "su", "runas", "xargs", "nohup", "timeout", "nice", "ionice", "stdbuf", "command", "builtin", "exec",
   "eval", "source", ".", "time", "watch", "start", "start-process", "invoke-expression", "iex", "invoke-command", "icm", "script",
-  "parallel", "setsid", "chroot", "unshare", "flock", "strace"]);
+  "parallel", "setsid", "chroot", "unshare", "flock", "strace", "cross-env", "dotenv", "concurrently"]);
+const ALWAYS_DOWNLOADS = new Set(["pnpx", "uvx", "pipx", "corepack"]);
 const INLINE_CODE = {
-  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:/,
+  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:|^--(import|loader|experimental-loader|require)=(data|https?):/,
   bun: /^(-e|--eval|-p|--print)$|^--(eval|print)=/,
-  python: /^-[A-Za-z]*c/, python3: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
+  python: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
   ruby: /^-[A-Za-z]*e/, perl: /^-[A-Za-z]*[eE]/, php: /^-r$/, lua: /^-e$/, rscript: /^-e$/, osascript: /^-e$/,
 };
-const GIT_DENIED = new Set(["push", "commit", "reset", "checkout", "switch", "restore", "stash", "clean", "rebase", "merge",
-  "cherry-pick", "revert", "am", "apply", "fetch", "pull", "clone", "ls-remote", "submodule", "worktree", "update-ref",
-  "filter-branch", "filter-repo", "notes", "replace", "gc", "prune", "send-email", "rm"]);
-const INSTALLS = new Set(["i", "install", "ci", "it", "cit", "install-test", "install-ci-test", "add", "remove", "rm", "uninstall",
-  "un", "update", "up", "upgrade", "publish", "link", "ln", "unlink"]);
-const FETCH_AND_RUN = new Set(["exec", "x", "dlx", "create", "init"]);
-const SERVER = new Set(["dev", "start", "serve", "preview", "deploy", "release"]);
+const GIT_READ = new Set(["status", "diff", "log", "show", "blame", "ls-files", "ls-tree", "rev-parse", "merge-base", "cat-file",
+  "describe", "shortlog", "grep", "for-each-ref", "rev-list", "name-rev", "check-ignore", "check-attr", "count-objects", "version"]);
+const GIT_DANGEROUS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv",
+  "--open-files-in-pager", "--filters"];
+const SAFE_EXACT = new Set(["--text"]);
+// npm aliases and pnpm, yarn and bun equivalents that install, remove, publish or touch the account and registry.
+const PACKAGE_DENIED = new Set(["i", "in", "ins", "inst", "insta", "instal", "install", "isnt", "isnta", "isntal", "isntall", "add",
+  "ci", "clean-install", "ic", "install-clean", "isntall-clean", "it", "install-test", "cit", "clean-install-test", "sit",
+  "install-ci-test", "uninstall", "unlink", "remove", "rm", "r", "un", "update", "up", "upgrade", "udpate", "publish", "unpublish",
+  "link", "ln", "dedupe", "ddp", "prune", "rebuild", "rb", "import", "dlx", "create", "init", "explore", "edit", "login", "logout",
+  "adduser", "add-user", "token", "owner", "access", "deprecate", "dist-tag", "team", "org", "star", "unstar", "hook", "profile"]);
+const PM_VALUE = new Set(["--prefix", "-C", "--dir", "--cwd", "--filter", "-F", "--workspace", "--userconfig", "--globalconfig",
+  "--cache", "--registry", "--loglevel", "--reporter"]);
+const RUNS_SCRIPT = new Set(["run", "run-script", "rum", "urn", "test", "t", "tst", "exec", "x"]);
+const SERVER = new Set(["dev", "start", "restart", "stop", "serve", "preview", "deploy", "release"]);
 const NETWORK = new Set(["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "ssh", "scp", "sftp", "rsync", "nc",
   "ncat", "netcat", "socat", "nmap", "ping", "telnet", "ftp", "tracert", "traceroute", "test-netconnection", "tnc", "openssl",
   "nslookup", "dig", "host", "gh", "hub", "glab"]);
@@ -190,18 +230,26 @@ const CLOUD = new Set(["docker", "docker-compose", "podman", "kubectl", "helm", 
   "ansible", "ansible-playbook", "systemctl", "service", "sc", "pm2", "nssm", "vercel", "netlify", "fly", "flyctl", "railway",
   "heroku", "az", "aws", "gcloud", "gsutil", "firebase", "wrangler", "supabase"]);
 const REMOVES = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "ri", "shred", "unlink"]);
-const READERS = new Set(["cat", "type", "more", "less", "head", "tail", "get-content", "gc", "bat", "strings", "xxd", "od",
-  "hexdump", "base64", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "awk", "gawk", "sed", "cut", "sort",
-  "uniq", "diff", "cmp", "cp", "copy", "copy-item", "mv", "move", "move-item"]);
+const LIST_ONLY = new Set(["ls", "dir", "get-childitem", "gci", "stat", "test", "which", "where", "command"]);
 const MIGRATION = /prisma (migrate (deploy|reset|dev|resolve)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/;
 
-function isSecret(arg) {
-  const b = arg.replace(/^.*[\\/]/, "");
-  if (b === ".env") return true;
-  if (/^\.env\./i.test(b) && !/^\.env\.(example|sample|template|dist)$/i.test(b)) return true;
-  if (/\.(pem|key|pfx|p12)$/i.test(b)) return true;
-  if (/^id_(rsa|ed25519|ecdsa|dsa)$/i.test(b)) return true;
-  if (/(^|[\\/])\.ssh([\\/]|$)/.test(arg) || /credenciais|credentials/i.test(arg) || /^(senha|password)[^\\/]*\.txt$/i.test(b)) return true;
+let CWD = process.cwd();
+
+// Denies a dangerous long option, abbreviated too (git accepts a unique prefix). Stops at "--".
+function checkOptions(args, dangerous) {
+  for (const a of args) {
+    if (a === "--") return;
+    if (!a.startsWith("--")) continue;
+    const name = a.split("=")[0];
+    if (name.length > 2 && !SAFE_EXACT.has(name) && dangerous.some((p) => p.startsWith(name))) deny("option that executes or writes");
+  }
+}
+
+// Does the git subcommand show file content (and not only names or statistics)?
+function showsContent(sub, r) {
+  if (["blame", "cat-file", "grep"].includes(sub)) return true;
+  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
+  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
   return false;
 }
 
@@ -214,20 +262,72 @@ function checkGit(a) {
   }
   const sub = a[i];
   const r = a.slice(i + 1);
-  if (GIT_DENIED.has(sub)) deny("Git that changes history, files or remote, or uses the network");
-  if (sub === "branch" && r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))) deny("Git that changes a branch or remote");
-  if (sub === "remote" && r.some((x) => ["add", "set-url", "remove", "rm", "rename", "set-head", "prune", "update", "set-branches"].includes(x))) deny("Git that changes a branch or remote");
-  if (sub === "tag" && !(r.length === 0 || r.includes("-l") || r.includes("--list"))) deny("Git that changes history or files");
-  if (sub === "config" && !r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x))) deny("git config that writes");
+  if (sub === undefined) return;
+  const pos = r.filter((x) => !x.startsWith("-"));
+  let ok = GIT_READ.has(sub);
+  if (sub === "branch") ok = !r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))
+    && (pos.length === 0 || r.some((x) => /^(--list|-l|-a|--all|-r|--remotes|-v|-vv|--contains|--no-contains|--merged|--no-merged|--points-at)/.test(x)));
+  if (sub === "tag") ok = !r.some((x) => /^(-a|-s|-u|-f|-d|-m|-F|--annotate|--sign|--local-user|--force|--delete|--message|--file)/.test(x))
+    && (pos.length === 0 || r.some((x) => /^(--list|-l|--contains|--no-contains|--merged|--no-merged|--points-at|-n)/.test(x)));
+  if (sub === "remote") ok = r.length === 0 || (r.length === 1 && r[0] === "-v") || r[0] === "get-url";
+  if (sub === "config") ok = r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x));
+  if (sub === "stash" || sub === "worktree") ok = r[0] === "list";
+  if (sub === "reflog") ok = r[0] === undefined || r[0] === "show" || (r[0].startsWith("-") && !r.includes("expire") && !r.includes("delete"));
+  if (!ok) deny("Git not on the read-only list (commit, push, checkout and the like stay with the user)");
+  checkOptions(r, GIT_DANGEROUS);
+  if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) deny("option that executes or writes");
+  if (showsContent(sub, r) && r.some(isSecret)) deny("reading a secret file");
 }
 
-// npx, bunx, npm exec, pnpm exec: denies a package downloaded on the fly and checks the inner command.
-function checkRunner(a) {
+// Is the package in node_modules/.bin of this folder or of a folder above?
+function localBin(pkg) {
+  const bin = pkg.replace(/^@[^/]+\//, "");
+  if (!/^[\w.-]+$/.test(bin)) return false;
+  let d = CWD;
+  for (let k = 0; k < 40; k++) {
+    for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", bin + ext))) return true;
+    const parent = dirname(d);
+    if (parent === d) break;
+    d = parent;
+  }
+  return false;
+}
+
+// npx, bunx, npm exec, bun x (may download) and pnpm exec, yarn exec (local only): checks the package and the inner command.
+function checkRunner(a, localOnly) {
   if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+  const noInstall = a.some((x) => x === "--no" || x === "--no-install");
   const i = a.findIndex((x) => !x.startsWith("-"));
   if (i < 0) return;
-  if ((a[i] === "playwright" || a[i] === "cypress") && a[i + 1] === "install") deny("browser download");
+  const pkg = a[i];
+  if (/^.+@/.test(pkg)) deny("package with a version, downloaded on the fly");
+  if ((pkg === "playwright" || pkg === "cypress") && a[i + 1] === "install") deny("browser download");
+  if (!localOnly && !noInstall && !localBin(pkg)) deny("a package outside the project's node_modules would be downloaded on the fly (use npx --no or ask the user)");
   check(a.slice(i));
+}
+
+// pip, uv, poetry and the like: "run" executes what comes after; the rest is checked word by word.
+function checkSuffixes(a) {
+  for (let k = 0; k < a.length; k++) if (!a[k].startsWith("-")) check(a.slice(k));
+}
+
+function checkManager(prog, a) {
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) i += PM_VALUE.has(a[i]) ? 2 : 1;
+  const sub = a[i];
+  if (sub === undefined) {
+    if (prog === "yarn" && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) deny("package install or publish");
+    return;
+  }
+  if (sub === "exec" || (sub === "x" && prog !== "yarn")) return checkRunner(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  const w = wordsUntil(a, RUNS_SCRIPT);
+  if (w.some((x) => PACKAGE_DENIED.has(x))) deny("package install or publish, or registry account");
+  if (w.includes("audit") && w.includes("fix")) deny("package install or publish");
+  if (w.includes("version") && w.length > w.indexOf("version") + 1) deny("npm version creates a commit and a tag");
+  if (w.includes("config") && w.some((x) => ["set", "delete", "edit"].includes(x))) deny("package manager configuration");
+  if (prog === "yarn" && w.includes("set")) deny("package install or publish");
+  const script = ["run", "run-script", "rum", "urn"].includes(sub) ? a.slice(i + 1).find((x) => !x.startsWith("-")) : sub;
+  if (SERVER.has(script)) deny("server or deploy");
 }
 
 function check(argv) {
@@ -235,48 +335,55 @@ function check(argv) {
   if (argv[0].includes("=")) deny("environment variable before the command");
   const prog = nameOf(argv[0]);
   const a = argv.slice(1);
-  const w = words(a);
   const text = [prog, ...a].join(" ");
 
   if (FOLDER.has(prog)) deny("changing folder (use git -C <folder> or the tool's folder argument)");
   if (prog === "command" && a.length === 2 && (a[0] === "-v" || a[0] === "-V")) return; // only says whether the program exists
   if (SHELLS.has(prog)) deny("shell or command that wraps another (run the command directly)");
+  if (ALWAYS_DOWNLOADS.has(prog)) deny("running a package downloaded on the fly");
   if (prog === "printenv" || ((prog === "set" || prog === "export" || prog === "declare" || prog === "typeset") && (a.length === 0 || a.includes("-p")))) deny("environment variables (may hold secrets)");
   if (["get-childitem", "gci", "dir", "ls", "get-item", "gi"].includes(prog) && a.some((x) => /^env:/i.test(x))) deny("environment variables (may hold secrets)");
-  if (INLINE_CODE[prog] && beforeEnd(a).some((x) => INLINE_CODE[prog].test(x))) deny("inline code on the command line (use a project file or ask the user)");
-  if (prog === "deno" && (w[0] === "eval" || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) deny("inline code or code downloaded on the fly");
+  if (INLINE_CODE[prog] && a.some((x) => INLINE_CODE[prog].test(x))) deny("inline code on the command line (use a project file or ask the user)");
+  if (prog === "deno" && (a.includes("eval") || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) deny("inline code or code downloaded on the fly");
+  if (prog === "git") return checkGit(a);
+  if (!LIST_ONLY.has(prog) && a.some(isSecret)) deny("reading a secret file");
 
-  if (["npx", "pnpx", "bunx"].includes(prog)) return checkRunner(a);
-  if (["uvx", "pipx"].includes(prog)) deny("running a package downloaded on the fly");
-  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) {
-    const p = a.findIndex((x) => !x.startsWith("-"));
-    if (p >= 0 && (a[p] === "exec" || a[p] === "x")) return checkRunner(a.slice(p + 1));
-    if (prog === "yarn" && w.length === 0 && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) deny("package install or publish");
-    if (w.some((x) => INSTALLS.has(x)) || (w.includes("audit") && w.includes("fix"))) deny("package install or publish");
-    if (w[0] === "version" && w.length > 1) deny("npm version creates a commit and a tag");
-    if (w.some((x) => FETCH_AND_RUN.has(x))) deny("running a package downloaded on the fly");
-    if (w.some((x) => SERVER.has(x))) deny("server or deploy");
+  if (prog === "npx" || prog === "bunx") return checkRunner(a, false);
+  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) return checkManager(prog, a);
+  if (prog === "python" || prog === "py" || prog === "pythonw") {
+    for (let k = 0; k < a.length; k++) {
+      const x = a[k];
+      if (!x.startsWith("-") || x === "-") break;
+      if (/^-[A-Za-z]*[WX]$/.test(x)) { k++; continue; }
+      const m = /^-[A-Za-z]*m(.*)$/.exec(x);
+      if (m) { if (["pip", "ensurepip"].includes(m[1] || a[k + 1])) deny("Python package install"); break; }
+    }
   }
-  if (["pip", "pip3", "uv", "poetry", "pipenv", "conda"].includes(prog) && w.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) deny("Python package install");
-  if (["python", "python3", "py"].includes(prog)) {
-    const m = a.findIndex((x) => /^-[A-Za-z]*m$/.test(x));
-    if (m >= 0 && ["pip", "ensurepip"].includes(a[m + 1])) deny("Python package install");
+  if (["pip", "uv", "poetry", "pipenv", "conda", "pdm", "hatch", "rye"].includes(prog)) {
+    const w = wordsUntil(a, new Set(["run"]));
+    if (w[0] === "run") {
+      if (a.some((x) => /^--with/.test(x))) deny("running a package downloaded on the fly");
+      checkSuffixes(a.slice(a.indexOf("run") + 1));
+    } else if (w.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) deny("Python package install");
   }
-  if (prog === "dotnet" && ["add", "remove", "restore", "tool", "workload", "nuget"].includes(w[0])) deny(".NET package");
-  if (prog === "go" && w[0] === "run" && w.some((x) => x.includes("@"))) deny("running a package downloaded on the fly");
-  if ((prog === "cargo" && ["add", "install", "publish", "update"].includes(w[0])) || (prog === "go" && ["get", "install"].includes(w[0]))
-    || (prog === "gem" && w[0] === "install") || (prog === "composer" && ["require", "install", "update"].includes(w[0]))) deny("package install");
+  if (prog === "dotnet") {
+    const w = wordsUntil(a, new Set(["run", "test", "exec"]));
+    if (w[0] !== "ef" && w.some((x) => ["add", "remove", "restore", "tool", "workload", "nuget"].includes(x))) deny(".NET package");
+  }
+  if (prog === "go" && wordsUntil(a, new Set()).some((x, k, p) => (["get", "install"].includes(x)) || (p[0] === "run" && x.includes("@")))) deny("package install or package downloaded on the fly");
+  if (prog === "cargo" && wordsUntil(a, new Set(["run", "test"])).some((x) => ["add", "install", "publish", "update"].includes(x))) deny("package install");
+  if (prog === "gem" && wordsUntil(a, new Set(["exec"])).includes("install")) deny("package install");
+  if (prog === "composer" && wordsUntil(a, new Set(["run", "run-script", "exec"])).some((x) => ["require", "install", "update"].includes(x))) deny("package install");
   if (MIGRATION.test(text)) deny("migration or database change");
   if (NETWORK.has(prog)) deny("network");
   if (CLOUD.has(prog)) deny("deploy, container, cluster, cloud or service");
   if (REMOVES.has(prog)) deny("file removal (use Edit or Write; delete only on request)");
   if (prog === "find" && a.some((x) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(x))) deny("find that deletes, executes or writes");
-  if (READERS.has(prog) && a.some(isSecret)) deny("reading a secret file");
-  if (prog === "git") checkGit(a);
 }
 
 try {
   const input = JSON.parse(readFileSync(0, "utf8"));
+  if (typeof input?.cwd === "string" && input.cwd) CWD = input.cwd;
   const raw = input?.tool_input?.command;
   if (typeof raw !== "string") deny("input without a text command");
   const command = raw.trim();
@@ -301,7 +408,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
 
-Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a git global option and inline code (`node -e`, `python -c`) do not work as a bypass; any error inside it denies the command. Tested with 148 fictitious commands (41 allowed, 107 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
+Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. Tested with 220 fictitious commands (58 allowed, 162 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 

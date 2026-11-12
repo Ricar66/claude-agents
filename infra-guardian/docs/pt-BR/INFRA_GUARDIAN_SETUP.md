@@ -220,6 +220,33 @@ function validarCompose(a) {
   if (!opcoes.some((x) => x === "-q" || x === "--quiet" || x === "--no-interpolate")) negar("compose config sem -q nem --no-interpolate imprime segredos");
 }
 
+// Arquivo de segredo. Normaliza como o Windows (maiúsculas, ponto ou espaço no fim, :fluxo alternativo)
+// e olha também o caminho de <revisão>:<caminho> e de --opcao=<caminho>.
+function ehSegredo(arg) {
+  const m = String(arg).toLowerCase();
+  if (/credenciais|credentials/.test(m) || /(^|[\\/])\.ssh([\\/]|$)/.test(m)) return true;
+  const base = (x) => x.replace(/^.*[\\/]/, "");
+  const candidatos = [base(m).split(":")[0]];
+  if (m.includes(":")) candidatos.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes("=")) candidatos.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
+  return candidatos.some((c0) => {
+    const c = c0.replace(/[. ]+$/, "");
+    return c === ".env"
+      || (c.startsWith(".env.") && !/^\.env\.(example|sample|template|dist)$/.test(c))
+      || /\.(pem|key|pfx|p12)$/.test(c)
+      || /^id_(rsa|ed25519|ecdsa|dsa)$/.test(c)
+      || /^(senha|password)[^\\/]*\.txt$/.test(c);
+  });
+}
+
+// O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
+function mostraConteudo(sub, r) {
+  if (["blame", "cat-file", "grep"].includes(sub)) return true;
+  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
+  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
+  return false;
+}
+
 function validar(args) {
   const [prog, ...a] = args;
   if (prog === "git") {
@@ -232,6 +259,7 @@ function validar(args) {
       || (sub === "remote" && resto.length === 1 && resto[0] === "-v");
     if (!ok) negar("fora da lista de leitura");
     verificarOpcoes(resto, GIT_PERIGOSAS);
+    if (mostraConteudo(sub, resto) && resto.some(ehSegredo)) negar("leitura de arquivo de segredo");
     return;
   }
   if (prog === "ls") {
@@ -286,295 +314,7 @@ hooks:
 
 No Windows, se `~` não for expandido, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/infra-guardian-bash-guard.mjs`).
 
-Efeito: consulta remota autorizada (`kubectl get`, `ssh`) também fica bloqueada para o agente; a pessoa roda e entrega a saída. O script divide o comando como o bash faria e recusa o que o bash expandiria (aspas no meio de opção, `# Infra Guardian — instalação, permissões e operação
-
-## 1. O que vem no pacote
-
-```text
-infra-guardian/
-├── agent/
-│   ├── pt-BR/infra-guardian.md          ← agente com Bash (leitura local)
-│   ├── pt-BR/infra-guardian-static.md   ← mesma coisa, sem Bash
-│   ├── en/infra-guardian.md
-│   └── en/infra-guardian-static.md
-├── org-context-example/
-│   ├── pt-BR/SKILL.md                   ← exemplo fictício de contexto organizacional
-│   └── en/SKILL.md
-└── docs/
-    ├── pt-BR/                           ← guia de instalação, playbook, modelo de relatório, modelos de documentos, avaliações
-    └── en/
-```
-
-As duas variantes têm o mesmo texto de instruções; só mudam `name`, `description` e `tools`. As versões `pt-BR` e `en` de cada variante têm o mesmo `name`: **instale um idioma só**.
-
-| Variante | Ferramentas | Quando usar |
-|---|---|---|
-| `infra-guardian` | `Read`, `Grep`, `Glob`, `Bash` | Uso normal: pode rodar comandos locais de leitura (Git, validação de compose) |
-| `infra-guardian-static` | `Read`, `Grep`, `Glob` | Quando nenhum comando pode ser executado: o isolamento é técnico, não só instrução |
-
-Com `Bash` na lista, "somente leitura" depende do texto do agente e das camadas da seção 8. Sem `Bash`, o agente não tem como executar nada.
-
-## 2. Requisitos
-
-- Claude Code com subagentes em arquivo (`~/.claude/agents/` ou `.claude/agents/`). Escrito e conferido no Claude Code **2.1.221** contra a documentação oficial de subagentes, consultada em 12/11/2026.
-- Campos de frontmatter usados: `name`, `description`, `tools`, `model`, `effort`, `maxTurns`, `omitClaudeMd`, `color`, `skills`. Todos estão na lista oficial; campo desconhecido é ignorado sem aviso.
-- `omitClaudeMd: true` impede que o `CLAUDE.md` do projeto analisado entre como instrução (um repositório hostil poderia usá-lo para manipular o diagnóstico). A documentação indica o campo a partir do Claude Code **2.1.271**; em versão anterior ele é ignorado sem erro e essa proteção não existe. Recomendado: `claude update`.
-- `model: opus` exige acesso a um modelo Opus; sem ele, troque por `inherit` ou `sonnet`. `effort: high`: os níveis disponíveis dependem do modelo.
-- Nenhuma ferramenta de infraestrutura é obrigatória. Docker, Terraform, kubectl e validadores ajudam quando já estão instalados (playbook, seção 6).
-
-## 3. Instalação
-
-### 3.1 Para todos os projetos (recomendado)
-
-Windows (PowerShell):
-
-```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\agents" | Out-Null
-Copy-Item .\infra-guardian\agent\pt-BR\infra-guardian.md "$env:USERPROFILE\.claude\agents\"
-Copy-Item .\infra-guardian\agent\pt-BR\infra-guardian-static.md "$env:USERPROFILE\.claude\agents\"
-```
-
-Linux e macOS:
-
-```bash
-mkdir -p ~/.claude/agents
-cp infra-guardian/agent/pt-BR/infra-guardian.md infra-guardian/agent/pt-BR/infra-guardian-static.md ~/.claude/agents/
-```
-
-Troque `pt-BR` por `en` para a versão em inglês. A variante `static` é opcional.
-
-### 3.2 Só para um projeto
-
-Copie para `<projeto>/.claude/agents/`. Precedência oficial quando o mesmo nome existe em mais de um lugar: configurações gerenciadas > flag `--agents` > `.claude/agents/` do projeto > `~/.claude/agents/` > plugins.
-
-### 3.3 Conferir
-
-Abra uma **sessão nova** e peça: `Use o agente infra-guardian para discover desta pasta, somente leitura.` Se o Claude não delegar, rode `claude --debug` e procure o nome do arquivo: YAML inválido, `description` ausente ou `name` inválido fazem o arquivo ser pulado, com aviso só no log de debug.
-
-Atualizou o arquivo no repositório? Copie de novo e abra uma sessão nova: a cópia instalada não acompanha o repositório, e uma sessão já aberta pode continuar com a versão anterior do agente.
-
-## 4. Contexto organizacional (opcional e local)
-
-Os dois agentes pré-carregam a skill `infra-guardian-org-context` **se ela existir**. Se não existir, o Claude Code pula e registra um aviso no log de debug; o agente roda e informa "sem contexto organizacional".
-
-Use para dizer o que só a sua organização sabe: ambientes, servidores e o que roda em cada um, rede e links, backup, monitoramento, deploy, riscos operacionais conhecidos, decisões de risco aceito e regras internas (janela de mudança, quem executa).
-
-1. Pasta `~/.claude/skills/infra-guardian-org-context/` (ou `.claude/skills/…` do projeto).
-2. `SKILL.md` com frontmatter `name: infra-guardian-org-context` e uma `description`. **Não** use `disable-model-invocation: true`: skill com esse campo não é pré-carregada.
-3. Conteúdo como dado, não como ordem. Modelo fictício: `infra-guardian/org-context-example/pt-BR/SKILL.md`.
-
-Regras: nunca senha, token, chave ou valor de segredo; o arquivo é interno e não entra em repositório público; para manter o original em outra pasta, use um link (`New-Item -ItemType Junction -Path "$env:USERPROFILE\.claude\skills\infra-guardian-org-context" -Target "<pasta-original>"` no Windows; `ln -s <pasta-original> ~/.claude/skills/infra-guardian-org-context` no Linux e macOS). Se você também usa o Security Sentinel, os dois contextos se sobrepõem em servidores e rede: ao mudar um, revise o outro.
-
-## 5. Como invocar
-
-O agente identifica o modo pela palavra-chave; pedido amplo vira `discover`.
-
-- `Use o agente infra-guardian para discover deste repositório, somente leitura.`
-- `Use o agente infra-guardian para docker-review do compose de produção.`
-- `Use o agente infra-guardian para vps-audit; a saída de df, free e systemctl está em coleta/.`
-- `Use o agente infra-guardian para backup-dr do banco principal, propondo RPO e RTO para aprovação.`
-- `Use o agente infra-guardian para network-diagnose dos 504 no site; os logs do nginx estão em logs/.`
-- `Use o agente infra-guardian para pipeline-review do workflow de deploy.`
-- `Use o agente infra-guardian para release-readiness da versão 2.4.`
-- `Use o agente infra-guardian para verify-change dos itens IG-001 e IG-003 na branch atual.`
-- `Use o agente infra-guardian-static para architecture-review, sem executar nenhum comando.`
-
-Dicas: diga o ambiente (desenvolvimento, homologação, produção); anexe saídas de comando já filtradas; para `verify-change`, cole os achados anteriores para os IDs se manterem. O agente responde com texto; para guardar o relatório, peça ao Claude principal que salve, fora do repositório público quando o projeto for interno.
-
-## 6. Autorização
-
-Resumo (matriz completa no playbook, seção 3.1):
-
-| Ação | O agente |
-|---|---|
-| Ler arquivos e rodar comandos locais de leitura | Faz |
-| Consulta remota de leitura (SSH, `kubectl get`, `terraform plan`, CLI de cloud, query) | Só com autorização na conversa (alvo, ambiente, comando); de preferência a pessoa roda |
-| Qualquer mudança, em qualquer ambiente | Nunca faz: entrega o plano; quem executa é a pessoa ou o Claude principal |
-
-Autorização para diagnosticar não é autorização para mudar, e autorização para uma mudança não se estende a outra.
-
-## 7. Integração com o Security Sentinel
-
-Os dois agentes são da mesma coleção e se complementam:
-
-- O Infra Guardian cuida de disponibilidade, desempenho, capacidade, backup, deploy e custo. Quando encontra algo de segurança (porta de banco publicada, segredo em compose, serviço em conta pessoal, instrução maliciosa num README), registra o fato e lista o item na seção **"Para o Security Sentinel"** do relatório.
-- Subagentes não chamam outros subagentes nesta coleção (nenhum dos dois tem a ferramenta `Agent`). Quem encaminha é você ou o Claude principal: `Use o agente security-sentinel para avaliar os itens "Para o Security Sentinel" do relatório do Infra Guardian.`
-- Os dois compartilham contexto, não permissões. Nenhum aplica mudança.
-
-## 8. Permissões e endurecimento
-
-O que o pacote já faz:
-
-- `tools` é **lista fechada**: o agente não recebe Write, Edit, WebFetch, WebSearch, MCP, `Agent` nem a ferramenta de skills.
-- Sem `memory` (ligar memória dá Read, Write e Edit automaticamente).
-- Sem `permissionMode`: a documentação diz que esse campo é ignorado quando a sessão principal está em `auto`, `acceptEdits` ou `bypassPermissions`. Não é garantia, e o pacote não depende dele.
-- `omitClaudeMd: true` (2.1.271 ou mais novo).
-
-O que o pacote **não** faz sozinho: impedir que o `Bash` do `infra-guardian` execute mudança. O texto proíbe; instrução não é barreira. Para ambiente de risco, use a variante `static` ou ative as camadas abaixo (nenhuma vem ativada).
-
-### 8.1 Hook que restringe o Bash do agente
-
-Hook no frontmatter vale só enquanto o subagente roda. Hooks de agentes em `~/.claude/agents/` não dependem do diálogo de confiança da pasta; os de `.claude/agents/` do projeto, sim.
-
-**Proposta** (crie e ative só se quiser):
-
-1. Salve em `~/.claude/hooks/infra-guardian-bash-guard.mjs`:
-
-```js
-// Hook PreToolUse (Bash) do infra-guardian: permite só comandos locais de leitura conhecidos; o resto é negado (exit 2).
-// O comando é dividido como o bash faria, sem expandir nada, e o que o bash expandiria é recusado;
-// a checagem roda sobre os argumentos reais. Qualquer erro inesperado também nega (falha fechada).
-import { readFileSync } from "node:fs";
-
-const negar = (motivo) => {
-  process.stderr.write(`infra-guardian: comando bloqueado (${motivo}). Peça ao usuário para rodar, se for necessário.\n`);
-  process.exit(2);
-};
-
-// Divide como o bash, sem expandir: aspas simples são literais; em aspas duplas, \ só escapa " \ $ e crase.
-// Recusa operadores, $ e crase, barra invertida fora de aspas e caracteres de glob, chaves e parênteses fora de aspas.
-function dividir(s) {
-  if (/[\r\n]/.test(s)) negar("quebra de linha");
-  const args = [];
-  let atual = null;
-  let i = 0;
-  while (i < s.length) {
-    const c = s[i];
-    if (c === " " || c === "\t") { if (atual !== null) { args.push(atual); atual = null; } i++; continue; }
-    if (atual === null) {
-      atual = "";
-      if (c === "#") negar("comentário do shell");
-    }
-    if (c === "'") {
-      const fim = s.indexOf("'", i + 1);
-      if (fim < 0) negar("aspas sem fechar");
-      atual += s.slice(i + 1, fim);
-      i = fim + 1;
-      continue;
-    }
-    if (c === '"') {
-      let j = i + 1;
-      while (j < s.length && s[j] !== '"') {
-        if (s[j] === "$" || s[j] === "`") negar("expansão do shell ($ ou crase)");
-        if (s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1])) { atual += s[j + 1]; j += 2; continue; }
-        atual += s[j];
-        j++;
-      }
-      if (j >= s.length) negar("aspas sem fechar");
-      i = j + 1;
-      continue;
-    }
-    if (";&|<>".includes(c)) negar("encadeamento ou redirecionamento");
-    if (c === "$" || c === "`") negar("expansão do shell ($ ou crase)");
-    if (c === "\\") negar("barra invertida fora de aspas (ponha o caminho entre aspas)");
-    if ("*?[]{}()!".includes(c)) negar("caractere especial do shell fora de aspas (ponha entre aspas)");
-    atual += c;
-    i++;
-  }
-  if (atual !== null) args.push(atual);
-  return args;
-}
-
-// Nega opção longa perigosa, inclusive abreviada (o git aceita prefixo único). Nome exato de outra opção vence
-// a abreviação (--text não é --textconv). Para no "--".
-const EXATAS_SEGURAS = new Set(["--text"]);
-function verificarOpcoes(args, perigosas) {
-  for (const a of args) {
-    if (a === "--") return;
-    if (!a.startsWith("--")) continue;
-    const nome = a.split("=")[0];
-    if (nome.length > 2 && !EXATAS_SEGURAS.has(nome) && perigosas.some((p) => p.startsWith(nome))) negar("opção que executa ou grava");
-  }
-}
-
-const GIT_LEITURA = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "merge-base"]);
-const GIT_PERIGOSAS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv", "--open-files-in-pager"];
-const COM_VERSAO = new Set(["docker", "terraform", "tofu", "helm", "hadolint", "shellcheck", "actionlint", "promtool", "yamllint", "kubeconform", "tflint"]);
-const arquivo = (x) => typeof x === "string" && x.length > 0 && !x.startsWith("-");
-
-function validarCompose(a) {
-  // a = argumentos depois de "docker"
-  if (a[0] !== "compose") negar("fora da lista de leitura");
-  if (a.length === 2 && a[1] === "version") return;
-  let i = 1;
-  while (a[i] === "-f") {
-    if (!arquivo(a[i + 1])) negar("docker compose -f sem arquivo");
-    i += 2;
-  }
-  if (a[i] !== "config") negar("fora da lista de leitura");
-  const opcoes = a.slice(i + 1);
-  const aceitas = new Set(["-q", "--quiet", "--no-interpolate", "--no-env-resolution"]);
-  if (!opcoes.length || !opcoes.every((x) => aceitas.has(x))) negar("docker compose config só com -q, --quiet, --no-interpolate ou --no-env-resolution");
-  if (!opcoes.some((x) => x === "-q" || x === "--quiet" || x === "--no-interpolate")) negar("compose config sem -q nem --no-interpolate imprime segredos");
-}
-
-function validar(args) {
-  const [prog, ...a] = args;
-  if (prog === "git") {
-    let i = 0;
-    if (a[0] === "-C") { if (a.length < 3) negar("git -C sem pasta ou sem subcomando"); i = 2; }
-    const sub = a[i];
-    const resto = a.slice(i + 1);
-    const ok = GIT_LEITURA.has(sub)
-      || ((sub === "branch" || sub === "tag") && resto[0] === "--list")
-      || (sub === "remote" && resto.length === 1 && resto[0] === "-v");
-    if (!ok) negar("fora da lista de leitura");
-    verificarOpcoes(resto, GIT_PERIGOSAS);
-    return;
-  }
-  if (prog === "ls") {
-    if (a.every((x) => /^-[a-zA-Z1]+$/.test(x) || !x.startsWith("-"))) return;
-    negar("opção de ls fora da lista");
-  }
-  if (prog === "wc") {
-    const resto = /^-[lwcm]$/.test(a[0] ?? "") ? a.slice(1) : a;
-    if (resto.length && resto.every(arquivo)) return;
-    negar("uso de wc fora da lista");
-  }
-  if (COM_VERSAO.has(prog) && a.length === 1 && a[0] === "--version") return;
-  if (prog === "docker") return validarCompose(a);
-  if (prog === "kubectl" && a.length === 2 && a[0] === "version" && a[1] === "--client") return;
-  if (["hadolint", "shellcheck", "yamllint"].includes(prog) && a.length && a.every(arquivo)) return;
-  if (prog === "actionlint" && (a.length === 0 || (a.length === 1 && a[0] === "-no-color"))) return;
-  if (prog === "promtool" && a.length === 3 && a[0] === "check" && (a[1] === "rules" || a[1] === "config") && arquivo(a[2])) return;
-  if (prog === "terraform" && a[0] === "fmt" && a[1] === "-check") {
-    const resto = a.slice(2);
-    if (resto.length && arquivo(resto[resto.length - 1])) resto.pop(); // caminho opcional no fim
-    if (resto.every((x) => x === "-recursive" || x === "-diff")) return;
-    negar("terraform fmt com opção fora da lista");
-  }
-  negar("fora da lista de leitura");
-}
-
-try {
-  const entrada = JSON.parse(readFileSync(0, "utf8"));
-  const bruto = entrada?.tool_input?.command;
-  if (typeof bruto !== "string") negar("entrada sem comando em texto");
-  const comando = bruto.trim();
-  if (!comando) negar("vazio");
-  const args = dividir(comando);
-  if (!args.length) negar("vazio");
-  validar(args);
-  process.exit(0);
-} catch (e) {
-  negar(`erro ao analisar o comando: ${e?.message ?? e}`);
-}
-```
-
-2. Acrescente ao frontmatter do agente instalado:
-
-```yaml
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "node ~/.claude/hooks/infra-guardian-bash-guard.mjs"
-```
-
-No Windows, se `~` não for expandido, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/infra-guardian-bash-guard.mjs`).
-
-, crase, glob e barra invertida fora de aspas); a checagem roda sobre os argumentos reais, inclusive opções abreviadas, e qualquer erro dentro dele nega o comando.
+Efeito: consulta remota autorizada (`kubectl get`, `ssh`) também fica bloqueada para o agente; a pessoa roda e entrega a saída. O script divide o comando como o bash faria e recusa o que o bash expandiria (`$`, crase, glob e barra invertida fora de aspas); a checagem roda sobre os argumentos reais, inclusive opções abreviadas, e qualquer erro dentro dele nega o comando.
 
 ### 8.2 Regras `ask` para mudanças de infraestrutura (sessão inteira)
 
