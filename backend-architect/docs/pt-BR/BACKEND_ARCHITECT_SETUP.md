@@ -105,39 +105,187 @@ Hooks podem ficar no frontmatter do subagente e só valem enquanto ele roda. Hoo
 ```js
 // Hook PreToolUse (Bash) do backend-architect e do frontend-architect.
 // Barra o que esses agentes nunca podem fazer sozinhos; o resto segue o fluxo normal de permissão.
+// O comando é dividido como o bash faria, sem expandir nada, e o que o bash expandiria é recusado;
+// a checagem roda sobre os argumentos reais, com o nome do programa normalizado. Qualquer erro também nega.
+// É uma lista do que não pode: barra o acidente e o comando injetado comum, não é fronteira de segurança
+// (o agente edita código e roda testes, então pode executar código do projeto).
 import { readFileSync } from "node:fs";
-
-const entrada = JSON.parse(readFileSync(0, "utf8"));
-const comando = String(entrada?.tool_input?.command ?? "").trim();
 
 const negar = (motivo) => {
   process.stderr.write(`architect: comando bloqueado (${motivo}). Rode um comando por vez, sem cd; se precisar disso, peça ao usuário ou ao Claude principal.\n`);
   process.exit(2);
 };
 
-if (!comando) negar("vazio");
-if (/[;&|`\n\r]|\$\(|>|</.test(comando)) negar("encadeamento, redirecionamento ou substituição");
-if (/^(cd|pushd|Set-Location)\b/i.test(comando)) negar("mudar de pasta (use git -C <pasta> ou o argumento de pasta da ferramenta)");
+// Divide como o bash, sem expandir: aspas simples são literais; em aspas duplas, \ só escapa " \ $ e crase.
+// Recusa operadores, $ e crase, barra invertida fora de aspas e caracteres de glob, chaves e parênteses fora de aspas.
+function dividir(s) {
+  if (/[\r\n]/.test(s)) negar("quebra de linha");
+  const args = [];
+  let atual = null;
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === " " || c === "\t") { if (atual !== null) { args.push(atual); atual = null; } i++; continue; }
+    if (atual === null) {
+      atual = "";
+      if (c === "#") negar("comentário do shell");
+    }
+    if (c === "'") {
+      const fim = s.indexOf("'", i + 1);
+      if (fim < 0) negar("aspas sem fechar");
+      atual += s.slice(i + 1, fim);
+      i = fim + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && s[j] !== '"') {
+        if (s[j] === "$" || s[j] === "`") negar("encadeamento, redirecionamento ou substituição");
+        if (s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1])) { atual += s[j + 1]; j += 2; continue; }
+        atual += s[j];
+        j++;
+      }
+      if (j >= s.length) negar("aspas sem fechar");
+      i = j + 1;
+      continue;
+    }
+    if (";&|<>$`".includes(c)) negar("encadeamento, redirecionamento ou substituição");
+    if (c === "\\") negar("barra invertida fora de aspas (ponha o caminho entre aspas)");
+    if ("*?[]{}()!".includes(c)) negar("caractere especial do shell fora de aspas (ponha entre aspas)");
+    atual += c;
+    i++;
+  }
+  if (atual !== null) args.push(atual);
+  return args;
+}
 
-const regras = [
-  [/^git( -C ("[^"]+"|\S+))? (push|commit|reset|checkout|switch|restore|stash|clean|rebase|merge|cherry-pick|revert|tag|am|apply)\b/, "Git que altera histórico ou arquivos"],
-  [/^git( -C ("[^"]+"|\S+))? (branch|remote) .*(-d|-D|--delete|add|set-url|remove|rm)\b/, "Git que altera branch ou remoto"],
-  [/^(npm|pnpm|yarn|bun) (i|install|ci|add|remove|rm|uninstall|update|up|upgrade|publish|link|dlx)\b/, "instalação ou publicação de pacote"],
-  [/^(npx|pnpx|bunx) (-y|--yes)\b/, "execução de pacote baixado na hora"],
-  [/^npx (playwright|cypress) install\b/, "download de navegador"],
-  [/^(pip3?|uv|poetry|pipenv|conda) (install|add|remove|uninstall|update|sync|lock)\b|^python3? -m pip\b/, "instalação de pacote Python"],
-  [/^dotnet (add|remove|restore|tool|workload|nuget)\b/, "pacote .NET"],
-  [/^(cargo (add|install|publish|update)|go (get|install)|gem install|composer (require|install|update))\b/, "instalação de pacote"],
-  [/prisma (migrate (deploy|reset|dev)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/, "migração ou alteração de banco"],
-  [/^(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm|ssh|scp|sftp|rsync|nc|ncat|nmap|ping|telnet|ftp|tracert|traceroute|Test-NetConnection)\b/i, "rede"],
-  [/^(docker|podman|kubectl|helm|terraform|tofu|systemctl|service|sc|pm2|nssm|vercel|netlify|fly|railway|heroku|az|aws|gcloud)\b/i, "deploy, container, cluster, nuvem ou serviço"],
-  [/^(npm|pnpm|yarn|bun) (run )?(dev|start|serve|preview|deploy|release)\b/, "servidor ou deploy"],
-  [/^(rm|del|erase|rmdir|rd|Remove-Item|shred)\b/i, "remoção de arquivo (use Edit ou Write; apagar só com pedido)"],
-  [/(^|\s)(cat|type|more|less|head|tail|Get-Content|gc|bat|strings|xxd)\b.*(\.env(\.(?!example)[\w.-]+)?\b(?!\.example)|\.pem\b|\.key\b|\.pfx\b|\.p12\b|id_rsa|id_ed25519)/i, "leitura de arquivo de segredo"],
-  [/^(env|printenv|set)$|^Get-ChildItem Env:/i, "variáveis de ambiente (podem ter segredo)"],
-];
-for (const [re, motivo] of regras) if (re.test(comando)) negar(motivo);
-process.exit(0);
+// Nome do programa sem pasta, sem extensão do Windows e em minúsculas.
+const nomeDe = (p) => p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "");
+// Argumentos antes do "--" (depois dele, tudo é dado do programa).
+const antesDoFim = (a) => (a.includes("--") ? a.slice(0, a.indexOf("--")) : a);
+const palavras = (a) => antesDoFim(a).filter((x) => !x.startsWith("-"));
+
+const PASTA = new Set(["cd", "pushd", "popd", "set-location", "sl", "chdir"]);
+const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh", "wsl", "busybox",
+  "env", "sudo", "doas", "su", "runas", "xargs", "nohup", "timeout", "nice", "ionice", "stdbuf", "command", "builtin", "exec",
+  "eval", "source", ".", "time", "watch", "start", "start-process", "invoke-expression", "iex", "invoke-command", "icm", "script",
+  "parallel", "setsid", "chroot", "unshare", "flock", "strace"]);
+const CODIGO_NA_LINHA = {
+  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:/,
+  bun: /^(-e|--eval|-p|--print)$|^--(eval|print)=/,
+  python: /^-[A-Za-z]*c/, python3: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
+  ruby: /^-[A-Za-z]*e/, perl: /^-[A-Za-z]*[eE]/, php: /^-r$/, lua: /^-e$/, rscript: /^-e$/, osascript: /^-e$/,
+};
+const GIT_PROIBIDOS = new Set(["push", "commit", "reset", "checkout", "switch", "restore", "stash", "clean", "rebase", "merge",
+  "cherry-pick", "revert", "am", "apply", "fetch", "pull", "clone", "ls-remote", "submodule", "worktree", "update-ref",
+  "filter-branch", "filter-repo", "notes", "replace", "gc", "prune", "send-email", "rm"]);
+const INSTALA = new Set(["i", "install", "ci", "it", "cit", "install-test", "install-ci-test", "add", "remove", "rm", "uninstall",
+  "un", "update", "up", "upgrade", "publish", "link", "ln", "unlink"]);
+const BAIXA_E_RODA = new Set(["exec", "x", "dlx", "create", "init"]);
+const SERVIDOR = new Set(["dev", "start", "serve", "preview", "deploy", "release"]);
+const REDE = new Set(["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "ssh", "scp", "sftp", "rsync", "nc",
+  "ncat", "netcat", "socat", "nmap", "ping", "telnet", "ftp", "tracert", "traceroute", "test-netconnection", "tnc", "openssl",
+  "nslookup", "dig", "host", "gh", "hub", "glab"]);
+const NUVEM = new Set(["docker", "docker-compose", "podman", "kubectl", "helm", "terraform", "tofu", "terragrunt", "pulumi",
+  "ansible", "ansible-playbook", "systemctl", "service", "sc", "pm2", "nssm", "vercel", "netlify", "fly", "flyctl", "railway",
+  "heroku", "az", "aws", "gcloud", "gsutil", "firebase", "wrangler", "supabase"]);
+const REMOVE = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "ri", "shred", "unlink"]);
+const LEITORES = new Set(["cat", "type", "more", "less", "head", "tail", "get-content", "gc", "bat", "strings", "xxd", "od",
+  "hexdump", "base64", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "awk", "gawk", "sed", "cut", "sort",
+  "uniq", "diff", "cmp", "cp", "copy", "copy-item", "mv", "move", "move-item"]);
+const MIGRACAO = /prisma (migrate (deploy|reset|dev|resolve)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/;
+
+function ehSegredo(arg) {
+  const b = arg.replace(/^.*[\\/]/, "");
+  if (b === ".env") return true;
+  if (/^\.env\./i.test(b) && !/^\.env\.(example|sample|template|dist)$/i.test(b)) return true;
+  if (/\.(pem|key|pfx|p12)$/i.test(b)) return true;
+  if (/^id_(rsa|ed25519|ecdsa|dsa)$/i.test(b)) return true;
+  if (/(^|[\\/])\.ssh([\\/]|$)/.test(arg) || /credenciais|credentials/i.test(arg) || /^(senha|password)[^\\/]*\.txt$/i.test(b)) return true;
+  return false;
+}
+
+function verificarGit(a) {
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) {
+    const o = a[i];
+    if (o === "-c" || o.startsWith("--config-env") || o.startsWith("--exec-path")) negar("configuração do git na linha (pode executar comando)");
+    i += ["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"].includes(o) ? 2 : 1;
+  }
+  const sub = a[i];
+  const r = a.slice(i + 1);
+  if (GIT_PROIBIDOS.has(sub)) negar("Git que altera histórico, arquivos ou remoto, ou usa rede");
+  if (sub === "branch" && r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))) negar("Git que altera branch ou remoto");
+  if (sub === "remote" && r.some((x) => ["add", "set-url", "remove", "rm", "rename", "set-head", "prune", "update", "set-branches"].includes(x))) negar("Git que altera branch ou remoto");
+  if (sub === "tag" && !(r.length === 0 || r.includes("-l") || r.includes("--list"))) negar("Git que altera histórico ou arquivos");
+  if (sub === "config" && !r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x))) negar("git config que grava");
+}
+
+// npx, bunx, npm exec, pnpm exec: nega pacote baixado na hora e confere o comando de dentro.
+function verificarExecutor(a) {
+  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) negar("execução de pacote baixado na hora ou de comando embutido");
+  const i = a.findIndex((x) => !x.startsWith("-"));
+  if (i < 0) return;
+  if ((a[i] === "playwright" || a[i] === "cypress") && a[i + 1] === "install") negar("download de navegador");
+  verificar(a.slice(i));
+}
+
+function verificar(argv) {
+  if (!argv.length || !argv[0]) negar("vazio");
+  if (argv[0].includes("=")) negar("variável de ambiente antes do comando");
+  const prog = nomeDe(argv[0]);
+  const a = argv.slice(1);
+  const pal = palavras(a);
+  const texto = [prog, ...a].join(" ");
+
+  if (PASTA.has(prog)) negar("mudar de pasta (use git -C <pasta> ou o argumento de pasta da ferramenta)");
+  if (prog === "command" && a.length === 2 && (a[0] === "-v" || a[0] === "-V")) return; // só diz se o programa existe
+  if (SHELLS.has(prog)) negar("shell ou comando que embrulha outro (rode o comando direto)");
+  if (prog === "printenv" || ((prog === "set" || prog === "export" || prog === "declare" || prog === "typeset") && (a.length === 0 || a.includes("-p")))) negar("variáveis de ambiente (podem ter segredo)");
+  if (["get-childitem", "gci", "dir", "ls", "get-item", "gi"].includes(prog) && a.some((x) => /^env:/i.test(x))) negar("variáveis de ambiente (podem ter segredo)");
+  if (CODIGO_NA_LINHA[prog] && antesDoFim(a).some((x) => CODIGO_NA_LINHA[prog].test(x))) negar("código na linha de comando (use um arquivo do projeto ou peça ao usuário)");
+  if (prog === "deno" && (pal[0] === "eval" || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) negar("código na linha de comando ou baixado na hora");
+
+  if (["npx", "pnpx", "bunx"].includes(prog)) return verificarExecutor(a);
+  if (["uvx", "pipx"].includes(prog)) negar("execução de pacote baixado na hora");
+  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) {
+    const p = a.findIndex((x) => !x.startsWith("-"));
+    if (p >= 0 && (a[p] === "exec" || a[p] === "x")) return verificarExecutor(a.slice(p + 1));
+    if (prog === "yarn" && pal.length === 0 && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) negar("instalação ou publicação de pacote");
+    if (pal.some((x) => INSTALA.has(x)) || (pal.includes("audit") && pal.includes("fix"))) negar("instalação ou publicação de pacote");
+    if (pal[0] === "version" && pal.length > 1) negar("npm version cria commit e tag");
+    if (pal.some((x) => BAIXA_E_RODA.has(x))) negar("execução de pacote baixado na hora");
+    if (pal.some((x) => SERVIDOR.has(x))) negar("servidor ou deploy");
+  }
+  if (["pip", "pip3", "uv", "poetry", "pipenv", "conda"].includes(prog) && pal.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) negar("instalação de pacote Python");
+  if (["python", "python3", "py"].includes(prog)) {
+    const m = a.findIndex((x) => /^-[A-Za-z]*m$/.test(x));
+    if (m >= 0 && ["pip", "ensurepip"].includes(a[m + 1])) negar("instalação de pacote Python");
+  }
+  if (prog === "dotnet" && ["add", "remove", "restore", "tool", "workload", "nuget"].includes(pal[0])) negar("pacote .NET");
+  if (prog === "go" && pal[0] === "run" && pal.some((x) => x.includes("@"))) negar("execução de pacote baixado na hora");
+  if ((prog === "cargo" && ["add", "install", "publish", "update"].includes(pal[0])) || (prog === "go" && ["get", "install"].includes(pal[0]))
+    || (prog === "gem" && pal[0] === "install") || (prog === "composer" && ["require", "install", "update"].includes(pal[0]))) negar("instalação de pacote");
+  if (MIGRACAO.test(texto)) negar("migração ou alteração de banco");
+  if (REDE.has(prog)) negar("rede");
+  if (NUVEM.has(prog)) negar("deploy, container, cluster, nuvem ou serviço");
+  if (REMOVE.has(prog)) negar("remoção de arquivo (use Edit ou Write; apagar só com pedido)");
+  if (prog === "find" && a.some((x) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(x))) negar("find que apaga, executa ou grava");
+  if (LEITORES.has(prog) && a.some(ehSegredo)) negar("leitura de arquivo de segredo");
+  if (prog === "git") verificarGit(a);
+}
+
+try {
+  const entrada = JSON.parse(readFileSync(0, "utf8"));
+  const bruto = entrada?.tool_input?.command;
+  if (typeof bruto !== "string") negar("entrada sem comando em texto");
+  const comando = bruto.trim();
+  if (!comando) negar("vazio");
+  verificar(dividir(comando));
+  process.exit(0);
+} catch (e) {
+  negar(`erro ao analisar o comando: ${e?.message ?? e}`);
+}
 ```
 
 2. Acrescente ao frontmatter do agente instalado:
@@ -153,7 +301,7 @@ hooks:
 
 No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/architect-bash-guard.mjs`).
 
-Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. Testado com 63 comandos fictícios (20 liberados, 43 barrados), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
+Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio; qualquer erro dentro dele nega o comando. Testado com 148 comandos fictícios (41 liberados, 107 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
 
 ## 6. Como invocar
 

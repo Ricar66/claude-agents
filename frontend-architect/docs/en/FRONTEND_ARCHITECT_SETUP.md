@@ -93,7 +93,7 @@ hooks:
           command: "node ~/.claude/hooks/architect-bash-guard.mjs"
 ```
 
-On Windows, if `~` is not expanded by the hook's shell, use the absolute path. The hook also denies `npx playwright install` and `npm run dev`: for a browser test or a lab measurement, ask the caller to install the browser and start the server.
+On Windows, if `~` is not expanded by the hook's shell, use the absolute path. The hook also denies inline code (`node -e`; use a project file), `npx playwright install` and `npm run dev`: for a browser test or a lab measurement, ask the caller to install the browser and start the server.
 
 ## 6. How to invoke
 

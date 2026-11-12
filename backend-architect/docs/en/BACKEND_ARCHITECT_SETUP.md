@@ -105,39 +105,187 @@ Hooks can live in the subagent's frontmatter and only apply while it runs. Hooks
 ```js
 // PreToolUse (Bash) hook for backend-architect and frontend-architect.
 // Denies what these agents must never do on their own; everything else follows the normal permission flow.
+// The command is split the way bash would split it, without expanding anything, and whatever bash would expand is refused;
+// the check runs on the real arguments, with the program name normalized. Any error also denies.
+// It is a list of what is not allowed: it stops accidents and common injected commands, it is not a security boundary
+// (the agent edits code and runs tests, so it can run project code).
 import { readFileSync } from "node:fs";
-
-const input = JSON.parse(readFileSync(0, "utf8"));
-const command = String(input?.tool_input?.command ?? "").trim();
 
 const deny = (reason) => {
   process.stderr.write(`architect: command blocked (${reason}). Run one command at a time, without cd; if you need this, ask the user or the main Claude.\n`);
   process.exit(2);
 };
 
-if (!command) deny("empty");
-if (/[;&|`\n\r]|\$\(|>|</.test(command)) deny("chaining, redirection or substitution");
-if (/^(cd|pushd|Set-Location)\b/i.test(command)) deny("changing folder (use git -C <folder> or the tool's folder argument)");
+// Splits like bash, without expanding: single quotes are literal; inside double quotes, \ only escapes " \ $ and backtick.
+// Refuses operators, $ and backtick, backslash outside quotes, and glob, brace and parenthesis characters outside quotes.
+function split(s) {
+  if (/[\r\n]/.test(s)) deny("line break");
+  const args = [];
+  let current = null;
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === " " || c === "\t") { if (current !== null) { args.push(current); current = null; } i++; continue; }
+    if (current === null) {
+      current = "";
+      if (c === "#") deny("shell comment");
+    }
+    if (c === "'") {
+      const end = s.indexOf("'", i + 1);
+      if (end < 0) deny("unclosed quotes");
+      current += s.slice(i + 1, end);
+      i = end + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < s.length && s[j] !== '"') {
+        if (s[j] === "$" || s[j] === "`") deny("chaining, redirection or substitution");
+        if (s[j] === "\\" && j + 1 < s.length && '"\\$`'.includes(s[j + 1])) { current += s[j + 1]; j += 2; continue; }
+        current += s[j];
+        j++;
+      }
+      if (j >= s.length) deny("unclosed quotes");
+      i = j + 1;
+      continue;
+    }
+    if (";&|<>$`".includes(c)) deny("chaining, redirection or substitution");
+    if (c === "\\") deny("backslash outside quotes (put the path in quotes)");
+    if ("*?[]{}()!".includes(c)) deny("shell special character outside quotes (put it in quotes)");
+    current += c;
+    i++;
+  }
+  if (current !== null) args.push(current);
+  return args;
+}
 
-const rules = [
-  [/^git( -C ("[^"]+"|\S+))? (push|commit|reset|checkout|switch|restore|stash|clean|rebase|merge|cherry-pick|revert|tag|am|apply)\b/, "Git that changes history or files"],
-  [/^git( -C ("[^"]+"|\S+))? (branch|remote) .*(-d|-D|--delete|add|set-url|remove|rm)\b/, "Git that changes a branch or remote"],
-  [/^(npm|pnpm|yarn|bun) (i|install|ci|add|remove|rm|uninstall|update|up|upgrade|publish|link|dlx)\b/, "package install or publish"],
-  [/^(npx|pnpx|bunx) (-y|--yes)\b/, "running a package downloaded on the fly"],
-  [/^npx (playwright|cypress) install\b/, "browser download"],
-  [/^(pip3?|uv|poetry|pipenv|conda) (install|add|remove|uninstall|update|sync|lock)\b|^python3? -m pip\b/, "Python package install"],
-  [/^dotnet (add|remove|restore|tool|workload|nuget)\b/, ".NET package"],
-  [/^(cargo (add|install|publish|update)|go (get|install)|gem install|composer (require|install|update))\b/, "package install"],
-  [/prisma (migrate (deploy|reset|dev)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/, "migration or database change"],
-  [/^(curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm|ssh|scp|sftp|rsync|nc|ncat|nmap|ping|telnet|ftp|tracert|traceroute|Test-NetConnection)\b/i, "network"],
-  [/^(docker|podman|kubectl|helm|terraform|tofu|systemctl|service|sc|pm2|nssm|vercel|netlify|fly|railway|heroku|az|aws|gcloud)\b/i, "deploy, container, cluster, cloud or service"],
-  [/^(npm|pnpm|yarn|bun) (run )?(dev|start|serve|preview|deploy|release)\b/, "server or deploy"],
-  [/^(rm|del|erase|rmdir|rd|Remove-Item|shred)\b/i, "file removal (use Edit or Write; delete only on request)"],
-  [/(^|\s)(cat|type|more|less|head|tail|Get-Content|gc|bat|strings|xxd)\b.*(\.env(\.(?!example)[\w.-]+)?\b(?!\.example)|\.pem\b|\.key\b|\.pfx\b|\.p12\b|id_rsa|id_ed25519)/i, "reading a secret file"],
-  [/^(env|printenv|set)$|^Get-ChildItem Env:/i, "environment variables (may hold secrets)"],
-];
-for (const [re, reason] of rules) if (re.test(command)) deny(reason);
-process.exit(0);
+// Program name without folder, without Windows extension, in lowercase.
+const nameOf = (p) => p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "");
+// Arguments before "--" (after it, everything is data for the program).
+const beforeEnd = (a) => (a.includes("--") ? a.slice(0, a.indexOf("--")) : a);
+const words = (a) => beforeEnd(a).filter((x) => !x.startsWith("-"));
+
+const FOLDER = new Set(["cd", "pushd", "popd", "set-location", "sl", "chdir"]);
+const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "cmd", "powershell", "pwsh", "wsl", "busybox",
+  "env", "sudo", "doas", "su", "runas", "xargs", "nohup", "timeout", "nice", "ionice", "stdbuf", "command", "builtin", "exec",
+  "eval", "source", ".", "time", "watch", "start", "start-process", "invoke-expression", "iex", "invoke-command", "icm", "script",
+  "parallel", "setsid", "chroot", "unshare", "flock", "strace"]);
+const INLINE_CODE = {
+  node: /^(-e|--eval|-p|--print|-pe|-ep)$|^--(eval|print)=|^data:/,
+  bun: /^(-e|--eval|-p|--print)$|^--(eval|print)=/,
+  python: /^-[A-Za-z]*c/, python3: /^-[A-Za-z]*c/, py: /^-[A-Za-z]*c/, pythonw: /^-[A-Za-z]*c/,
+  ruby: /^-[A-Za-z]*e/, perl: /^-[A-Za-z]*[eE]/, php: /^-r$/, lua: /^-e$/, rscript: /^-e$/, osascript: /^-e$/,
+};
+const GIT_DENIED = new Set(["push", "commit", "reset", "checkout", "switch", "restore", "stash", "clean", "rebase", "merge",
+  "cherry-pick", "revert", "am", "apply", "fetch", "pull", "clone", "ls-remote", "submodule", "worktree", "update-ref",
+  "filter-branch", "filter-repo", "notes", "replace", "gc", "prune", "send-email", "rm"]);
+const INSTALLS = new Set(["i", "install", "ci", "it", "cit", "install-test", "install-ci-test", "add", "remove", "rm", "uninstall",
+  "un", "update", "up", "upgrade", "publish", "link", "ln", "unlink"]);
+const FETCH_AND_RUN = new Set(["exec", "x", "dlx", "create", "init"]);
+const SERVER = new Set(["dev", "start", "serve", "preview", "deploy", "release"]);
+const NETWORK = new Set(["curl", "wget", "invoke-webrequest", "iwr", "invoke-restmethod", "irm", "ssh", "scp", "sftp", "rsync", "nc",
+  "ncat", "netcat", "socat", "nmap", "ping", "telnet", "ftp", "tracert", "traceroute", "test-netconnection", "tnc", "openssl",
+  "nslookup", "dig", "host", "gh", "hub", "glab"]);
+const CLOUD = new Set(["docker", "docker-compose", "podman", "kubectl", "helm", "terraform", "tofu", "terragrunt", "pulumi",
+  "ansible", "ansible-playbook", "systemctl", "service", "sc", "pm2", "nssm", "vercel", "netlify", "fly", "flyctl", "railway",
+  "heroku", "az", "aws", "gcloud", "gsutil", "firebase", "wrangler", "supabase"]);
+const REMOVES = new Set(["rm", "del", "erase", "rmdir", "rd", "remove-item", "ri", "shred", "unlink"]);
+const READERS = new Set(["cat", "type", "more", "less", "head", "tail", "get-content", "gc", "bat", "strings", "xxd", "od",
+  "hexdump", "base64", "grep", "egrep", "fgrep", "rg", "findstr", "select-string", "sls", "awk", "gawk", "sed", "cut", "sort",
+  "uniq", "diff", "cmp", "cp", "copy", "copy-item", "mv", "move", "move-item"]);
+const MIGRATION = /prisma (migrate (deploy|reset|dev|resolve)|db (push|execute|seed))|dotnet ef database|knex migrate|sequelize db:|typeorm migration:run|alembic (upgrade|downgrade)|flask db (upgrade|downgrade)|rails db:/;
+
+function isSecret(arg) {
+  const b = arg.replace(/^.*[\\/]/, "");
+  if (b === ".env") return true;
+  if (/^\.env\./i.test(b) && !/^\.env\.(example|sample|template|dist)$/i.test(b)) return true;
+  if (/\.(pem|key|pfx|p12)$/i.test(b)) return true;
+  if (/^id_(rsa|ed25519|ecdsa|dsa)$/i.test(b)) return true;
+  if (/(^|[\\/])\.ssh([\\/]|$)/.test(arg) || /credenciais|credentials/i.test(arg) || /^(senha|password)[^\\/]*\.txt$/i.test(b)) return true;
+  return false;
+}
+
+function checkGit(a) {
+  let i = 0;
+  while (i < a.length && a[i].startsWith("-")) {
+    const o = a[i];
+    if (o === "-c" || o.startsWith("--config-env") || o.startsWith("--exec-path")) deny("inline git configuration (can run a command)");
+    i += ["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"].includes(o) ? 2 : 1;
+  }
+  const sub = a[i];
+  const r = a.slice(i + 1);
+  if (GIT_DENIED.has(sub)) deny("Git that changes history, files or remote, or uses the network");
+  if (sub === "branch" && r.some((x) => /^(-d|-D|--delete|-m|-M|--move|-c|-C|--copy|-f|--force|-u|--set-upstream-to|--unset-upstream|--edit-description)/.test(x))) deny("Git that changes a branch or remote");
+  if (sub === "remote" && r.some((x) => ["add", "set-url", "remove", "rm", "rename", "set-head", "prune", "update", "set-branches"].includes(x))) deny("Git that changes a branch or remote");
+  if (sub === "tag" && !(r.length === 0 || r.includes("-l") || r.includes("--list"))) deny("Git that changes history or files");
+  if (sub === "config" && !r.some((x) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(x))) deny("git config that writes");
+}
+
+// npx, bunx, npm exec, pnpm exec: denies a package downloaded on the fly and checks the inner command.
+function checkRunner(a) {
+  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+  const i = a.findIndex((x) => !x.startsWith("-"));
+  if (i < 0) return;
+  if ((a[i] === "playwright" || a[i] === "cypress") && a[i + 1] === "install") deny("browser download");
+  check(a.slice(i));
+}
+
+function check(argv) {
+  if (!argv.length || !argv[0]) deny("empty");
+  if (argv[0].includes("=")) deny("environment variable before the command");
+  const prog = nameOf(argv[0]);
+  const a = argv.slice(1);
+  const w = words(a);
+  const text = [prog, ...a].join(" ");
+
+  if (FOLDER.has(prog)) deny("changing folder (use git -C <folder> or the tool's folder argument)");
+  if (prog === "command" && a.length === 2 && (a[0] === "-v" || a[0] === "-V")) return; // only says whether the program exists
+  if (SHELLS.has(prog)) deny("shell or command that wraps another (run the command directly)");
+  if (prog === "printenv" || ((prog === "set" || prog === "export" || prog === "declare" || prog === "typeset") && (a.length === 0 || a.includes("-p")))) deny("environment variables (may hold secrets)");
+  if (["get-childitem", "gci", "dir", "ls", "get-item", "gi"].includes(prog) && a.some((x) => /^env:/i.test(x))) deny("environment variables (may hold secrets)");
+  if (INLINE_CODE[prog] && beforeEnd(a).some((x) => INLINE_CODE[prog].test(x))) deny("inline code on the command line (use a project file or ask the user)");
+  if (prog === "deno" && (w[0] === "eval" || a.some((x) => /^(https?|data|npm|jsr):/i.test(x)))) deny("inline code or code downloaded on the fly");
+
+  if (["npx", "pnpx", "bunx"].includes(prog)) return checkRunner(a);
+  if (["uvx", "pipx"].includes(prog)) deny("running a package downloaded on the fly");
+  if (["npm", "pnpm", "yarn", "bun"].includes(prog)) {
+    const p = a.findIndex((x) => !x.startsWith("-"));
+    if (p >= 0 && (a[p] === "exec" || a[p] === "x")) return checkRunner(a.slice(p + 1));
+    if (prog === "yarn" && w.length === 0 && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) deny("package install or publish");
+    if (w.some((x) => INSTALLS.has(x)) || (w.includes("audit") && w.includes("fix"))) deny("package install or publish");
+    if (w[0] === "version" && w.length > 1) deny("npm version creates a commit and a tag");
+    if (w.some((x) => FETCH_AND_RUN.has(x))) deny("running a package downloaded on the fly");
+    if (w.some((x) => SERVER.has(x))) deny("server or deploy");
+  }
+  if (["pip", "pip3", "uv", "poetry", "pipenv", "conda"].includes(prog) && w.some((x) => ["install", "add", "remove", "uninstall", "update", "sync", "lock", "upgrade"].includes(x))) deny("Python package install");
+  if (["python", "python3", "py"].includes(prog)) {
+    const m = a.findIndex((x) => /^-[A-Za-z]*m$/.test(x));
+    if (m >= 0 && ["pip", "ensurepip"].includes(a[m + 1])) deny("Python package install");
+  }
+  if (prog === "dotnet" && ["add", "remove", "restore", "tool", "workload", "nuget"].includes(w[0])) deny(".NET package");
+  if (prog === "go" && w[0] === "run" && w.some((x) => x.includes("@"))) deny("running a package downloaded on the fly");
+  if ((prog === "cargo" && ["add", "install", "publish", "update"].includes(w[0])) || (prog === "go" && ["get", "install"].includes(w[0]))
+    || (prog === "gem" && w[0] === "install") || (prog === "composer" && ["require", "install", "update"].includes(w[0]))) deny("package install");
+  if (MIGRATION.test(text)) deny("migration or database change");
+  if (NETWORK.has(prog)) deny("network");
+  if (CLOUD.has(prog)) deny("deploy, container, cluster, cloud or service");
+  if (REMOVES.has(prog)) deny("file removal (use Edit or Write; delete only on request)");
+  if (prog === "find" && a.some((x) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(x))) deny("find that deletes, executes or writes");
+  if (READERS.has(prog) && a.some(isSecret)) deny("reading a secret file");
+  if (prog === "git") checkGit(a);
+}
+
+try {
+  const input = JSON.parse(readFileSync(0, "utf8"));
+  const raw = input?.tool_input?.command;
+  if (typeof raw !== "string") deny("input without a text command");
+  const command = raw.trim();
+  if (!command) deny("empty");
+  check(split(command));
+  process.exit(0);
+} catch (e) {
+  deny(`error parsing the command: ${e?.message ?? e}`);
+}
 ```
 
 2. Add to the installed agent's frontmatter:
@@ -153,7 +301,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
 
-Effect: commit, push, install and migration become requests to the user or the main Claude. Tested with 63 fictitious commands (20 allowed, 43 denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
+Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a git global option and inline code (`node -e`, `python -c`) do not work as a bypass; any error inside it denies the command. Tested with 148 fictitious commands (41 allowed, 107 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 
