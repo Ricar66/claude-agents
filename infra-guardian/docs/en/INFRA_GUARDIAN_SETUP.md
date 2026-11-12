@@ -240,15 +240,9 @@ function isSecret(arg) {
   });
 }
 
-// Does the git subcommand show file content (and not only names or statistics)?
-function showsContent(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
-  if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
-  return false;
-}
-
+// git subcommands that can show file content. With them, a secret, a glob and a special pathspec are
+// denied whatever the option (fail closed: grouped letter options, such as -3p, would escape a list).
+const SHOWS_CONTENT = new Set(["show", "diff", "log", "blame", "cat-file", "grep"]);
 // A git glob or special pathspec (':(glob)', ':!') picks files without naming them; in a command that shows
 // content, that would open a secret without the name .env appearing.
 // Excluding a secret (':(exclude).env', ':!.env') is the safe use and passes.
@@ -270,8 +264,8 @@ function validate(args) {
       || (sub === "remote" && rest.length === 1 && rest[0] === "-v");
     if (!ok) deny("not on the read-only list");
     checkOptions(rest, GIT_DANGEROUS);
-    if (showsContent(sub, rest) && rest.some(isSecret)) deny("reading a secret file");
-    if (showsContent(sub, rest) && rest.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
+    if (SHOWS_CONTENT.has(sub) && rest.some(isSecret)) deny("reading a secret file");
+    if (SHOWS_CONTENT.has(sub) && rest.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
     return;
   }
   if (prog === "ls") {

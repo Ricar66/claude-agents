@@ -248,15 +248,9 @@ function verificarOpcoes(args, perigosas) {
   }
 }
 
-// O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
-function mostraConteudo(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
-  if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
-  return false;
-}
-
+// Subcomandos do git que podem mostrar conteúdo de arquivo. Com eles, segredo, curinga e pathspec especial são
+// negados qualquer que seja a opção (falha fechada: opções de letra agrupadas, como -3p, escapariam de uma lista).
+const MOSTRA_CONTEUDO = new Set(["show", "diff", "log", "blame", "cat-file", "grep"]);
 // Curinga ou pathspec especial do git (':(glob)', ':!') escolhe arquivos sem dar o nome; em comando que mostra
 // conteúdo, isso abriria um segredo sem que o nome .env apareça.
 // Excluir um segredo (':(exclude).env', ':!.env') é o uso seguro e passa.
@@ -289,8 +283,8 @@ function verificarGit(a) {
   if (!ok) negar("Git fora da lista de leitura (commit, push, checkout e afins ficam com o usuário)");
   verificarOpcoes(r, GIT_PERIGOSAS);
   if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) negar("opção que executa ou grava");
-  if (mostraConteudo(sub, r) && r.some(ehSegredo)) negar("leitura de arquivo de segredo");
-  if (mostraConteudo(sub, r) && r.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
+  if (MOSTRA_CONTEUDO.has(sub) && r.some(ehSegredo)) negar("leitura de arquivo de segredo");
+  if (MOSTRA_CONTEUDO.has(sub) && r.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
   if (sub === "grep" && r.some((x) => /^--(no-index|untracked|no-exclude-standard)/.test(x))) negar("git grep fora dos arquivos versionados (pode ler segredo)");
 }
 
@@ -313,9 +307,9 @@ function binLocal(pacote) {
 // Opção de npx/npm exec que baixa pacote ou roda comando embutido, inclusive abreviada (--ye, --pack, --cal)
 // e em grupo de letras (-yq).
 const opcaoDeBaixar = (x) => {
-  if (/^-[a-zA-Z]+$/.test(x)) return /[ypc]/.test(x);
-  if (!x.startsWith("--")) return false;
   const nome = x.split("=")[0];
+  if (/^-[a-zA-Z]+$/.test(nome)) return /[ypc]/.test(nome);
+  if (!nome.startsWith("--")) return false;
   return nome.length > 2 && ["--yes", "--package", "--call"].some((p) => p.startsWith(nome));
 };
 
@@ -438,7 +432,7 @@ hooks:
 
 No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/architect-bash-guard.mjs`).
 
-Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, versão no nome (`python3.12`), opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio. No git só passam subcomandos de leitura, e nenhum que mostre o conteúdo de um arquivo de segredo (`git show HEAD:.env`). O `npx` (e `npm exec`, `bunx`) só roda pacote que já está no `node_modules/.bin` do projeto, ou com `--no`: sem terminal, o npx baixaria o pacote sem perguntar. Qualquer erro dentro do script nega o comando. Pacote com escopo (`@escopo/nome`) precisa estar instalado com esse nome exato, e `--yes` antes do subcomando (`npm --yes exec`) também é barrado. Limite do segredo: um segredo já versionado aparece em qualquer `git show <commit>` ou `git log -p` que o altere, porque o agente precisa ler diffs para trabalhar; o hook barra só o pedido pelo nome, com curinga ou com pathspec especial. A defesa é não versionar segredo (o agente aponta quando acha) e a regra de nunca reproduzir valor. Testado com 245 comandos fictícios (62 liberados, 183 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
+Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, versão no nome (`python3.12`), opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio. No git só passam subcomandos de leitura, e nenhum que mostre o conteúdo de um arquivo de segredo (`git show HEAD:.env`). O `npx` (e `npm exec`, `bunx`) só roda pacote que já está no `node_modules/.bin` do projeto, ou com `--no`: sem terminal, o npx baixaria o pacote sem perguntar. Qualquer erro dentro do script nega o comando. Pacote com escopo (`@escopo/nome`) precisa estar instalado com esse nome exato, e `--yes` antes do subcomando (`npm --yes exec`) também é barrado. Limite do segredo: um segredo já versionado aparece em qualquer `git show <commit>` ou `git log -p` que o altere, porque o agente precisa ler diffs para trabalhar; o hook barra só o pedido pelo nome, com curinga ou com pathspec especial. A defesa é não versionar segredo (o agente aponta quando acha) e a regra de nunca reproduzir valor. Testado com 248 comandos fictícios (61 liberados, 187 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
 
 ## 6. Como invocar
 

@@ -215,15 +215,9 @@ function ehSegredo(arg) {
   });
 }
 
-// O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
-function mostraConteudo(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
-  if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
-  return false;
-}
-
+// Subcomandos do git que podem mostrar conteúdo de arquivo. Com eles, segredo, curinga e pathspec especial são
+// negados qualquer que seja a opção (falha fechada: opções de letra agrupadas, como -3p, escapariam de uma lista).
+const MOSTRA_CONTEUDO = new Set(["show", "diff", "log", "blame", "cat-file", "grep"]);
 // Curinga ou pathspec especial do git (':(glob)', ':!') escolhe arquivos sem dar o nome; em comando que mostra
 // conteúdo, isso abriria um segredo sem que o nome .env apareça.
 // Excluir um segredo (':(exclude).env', ':!.env') é o uso seguro e passa.
@@ -245,8 +239,8 @@ function validar(args) {
       || (sub === "remote" && resto.length === 1 && resto[0] === "-v");
     if (!ok) negar("fora da lista de leitura");
     verificarOpcoes(resto, GIT_PERIGOSAS);
-    if (mostraConteudo(sub, resto) && resto.some(ehSegredo)) negar("leitura de arquivo de segredo");
-    if (mostraConteudo(sub, resto) && resto.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
+    if (MOSTRA_CONTEUDO.has(sub) && resto.some(ehSegredo)) negar("leitura de arquivo de segredo");
+    if (MOSTRA_CONTEUDO.has(sub) && resto.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
     return;
   }
   if (prog === "ls") {

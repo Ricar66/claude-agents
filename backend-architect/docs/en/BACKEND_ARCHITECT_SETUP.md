@@ -248,15 +248,9 @@ function checkOptions(args, dangerous) {
   }
 }
 
-// Does the git subcommand show file content (and not only names or statistics)?
-function showsContent(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
-  if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
-  return false;
-}
-
+// git subcommands that can show file content. With them, a secret, a glob and a special pathspec are
+// denied whatever the option (fail closed: grouped letter options, such as -3p, would escape a list).
+const SHOWS_CONTENT = new Set(["show", "diff", "log", "blame", "cat-file", "grep"]);
 // A git glob or special pathspec (':(glob)', ':!') picks files without naming them; in a command that shows
 // content, that would open a secret without the name .env appearing.
 // Excluding a secret (':(exclude).env', ':!.env') is the safe use and passes.
@@ -289,8 +283,8 @@ function checkGit(a) {
   if (!ok) deny("Git not on the read-only list (commit, push, checkout and the like stay with the user)");
   checkOptions(r, GIT_DANGEROUS);
   if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) deny("option that executes or writes");
-  if (showsContent(sub, r) && r.some(isSecret)) deny("reading a secret file");
-  if (showsContent(sub, r) && r.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
+  if (SHOWS_CONTENT.has(sub) && r.some(isSecret)) deny("reading a secret file");
+  if (SHOWS_CONTENT.has(sub) && r.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
   if (sub === "grep" && r.some((x) => /^--(no-index|untracked|no-exclude-standard)/.test(x))) deny("git grep outside tracked files (may read a secret)");
 }
 
@@ -313,9 +307,9 @@ function localBin(pkg) {
 // An npx/npm exec option that downloads a package or runs an embedded command, abbreviated too (--ye, --pack, --cal)
 // and in a group of letters (-yq).
 const isDownloadOption = (x) => {
-  if (/^-[a-zA-Z]+$/.test(x)) return /[ypc]/.test(x);
-  if (!x.startsWith("--")) return false;
   const name = x.split("=")[0];
+  if (/^-[a-zA-Z]+$/.test(name)) return /[ypc]/.test(name);
+  if (!name.startsWith("--")) return false;
   return name.length > 2 && ["--yes", "--package", "--call"].some((p) => p.startsWith(name));
 };
 
@@ -438,7 +432,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
 
-Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. A scoped package (`@scope/name`) must be installed under that exact name, and `--yes` before the subcommand (`npm --yes exec`) is denied too. Secret limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. Tested with 245 fictitious commands (62 allowed, 183 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
+Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. A scoped package (`@scope/name`) must be installed under that exact name, and `--yes` before the subcommand (`npm --yes exec`) is denied too. Secret limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. Tested with 248 fictitious commands (61 allowed, 187 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 
