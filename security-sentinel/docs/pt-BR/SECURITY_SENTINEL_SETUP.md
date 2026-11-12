@@ -192,7 +192,7 @@ function verificarOpcoes(args, perigosas) {
 }
 
 const GIT_LEITURA = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "merge-base"]);
-const GIT_PERIGOSAS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv", "--open-files-in-pager"];
+const GIT_PERIGOSAS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv", "--open-files-in-pager", "--no-index", "--untracked", "--no-exclude-standard"];
 const SCANNERS = new Set(["semgrep", "trivy", "osv-scanner", "gitleaks", "checkov", "codeql", "syft"]);
 
 // Arquivo de segredo. Normaliza como o Windows (maiúsculas, ponto ou espaço no fim, :fluxo alternativo)
@@ -217,10 +217,10 @@ function ehSegredo(arg) {
 
 // O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
 function mostraConteudo(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
   if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch;
+  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
   return false;
 }
 

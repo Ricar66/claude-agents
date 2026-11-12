@@ -214,7 +214,7 @@ const INLINE_CODE = {
 const GIT_READ = new Set(["status", "diff", "log", "show", "blame", "ls-files", "ls-tree", "rev-parse", "merge-base", "cat-file",
   "describe", "shortlog", "grep", "for-each-ref", "rev-list", "name-rev", "check-ignore", "check-attr", "count-objects", "version"]);
 const GIT_DANGEROUS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv",
-  "--open-files-in-pager", "--filters"];
+  "--open-files-in-pager", "--no-index", "--untracked", "--no-exclude-standard", "--filters"];
 const SAFE_EXACT = new Set(["--text"]);
 // npm aliases and pnpm, yarn and bun equivalents that install, remove, publish or touch the account and registry.
 const PACKAGE_DENIED = new Set(["i", "in", "ins", "inst", "insta", "instal", "install", "isnt", "isnta", "isntal", "isntall", "add",
@@ -250,10 +250,10 @@ function checkOptions(args, dangerous) {
 
 // Does the git subcommand show file content (and not only names or statistics)?
 function showsContent(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
   if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch;
+  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
   return false;
 }
 
@@ -310,9 +310,18 @@ function localBin(pkg) {
   return false;
 }
 
+// An npx/npm exec option that downloads a package or runs an embedded command, abbreviated too (--ye, --pack, --cal)
+// and in a group of letters (-yq).
+const isDownloadOption = (x) => {
+  if (/^-[a-zA-Z]+$/.test(x)) return /[ypc]/.test(x);
+  if (!x.startsWith("--")) return false;
+  const name = x.split("=")[0];
+  return name.length > 2 && ["--yes", "--package", "--call"].some((p) => p.startsWith(name));
+};
+
 // npx, bunx, npm exec, bun x (may download) and pnpm exec, yarn exec (local only): checks the package and the inner command.
 function checkRunner(a, localOnly) {
-  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+  if (a.some(isDownloadOption)) deny("running a package downloaded on the fly or an embedded command");
   const noInstall = a.some((x) => x === "--no" || x === "--no-install");
   const i = a.findIndex((x) => !x.startsWith("-"));
   if (i < 0) return;
@@ -338,7 +347,7 @@ function checkManager(prog, a) {
   }
   if (sub === "exec" || (sub === "x" && prog !== "yarn")) {
     // a download or embedded-command option can come before the subcommand (npm --yes exec x)
-    if (a.slice(0, i).some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+    if (a.slice(0, i).some(isDownloadOption)) deny("running a package downloaded on the fly or an embedded command");
     return checkRunner(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
   }
   const w = wordsUntil(a, RUNS_SCRIPT);
@@ -429,7 +438,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
 
-Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. A scoped package (`@scope/name`) must be installed under that exact name, and `--yes` before the subcommand (`npm --yes exec`) is denied too. Secret limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. Tested with 238 fictitious commands (61 allowed, 177 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
+Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. A scoped package (`@scope/name`) must be installed under that exact name, and `--yes` before the subcommand (`npm --yes exec`) is denied too. Secret limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. Tested with 245 fictitious commands (62 allowed, 183 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 

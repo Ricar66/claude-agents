@@ -200,7 +200,7 @@ function checkOptions(args, dangerous) {
 }
 
 const GIT_READ = new Set(["status", "diff", "log", "show", "blame", "ls-files", "rev-parse", "merge-base"]);
-const GIT_DANGEROUS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv", "--open-files-in-pager"];
+const GIT_DANGEROUS = ["--output", "--exec", "--upload-pack", "--receive-pack", "--config-env", "--ext-diff", "--textconv", "--open-files-in-pager", "--no-index", "--untracked", "--no-exclude-standard"];
 const WITH_VERSION = new Set(["docker", "terraform", "tofu", "helm", "hadolint", "shellcheck", "actionlint", "promtool", "yamllint", "kubeconform", "tflint"]);
 const isFile = (x) => typeof x === "string" && x.length > 0 && !x.startsWith("-");
 
@@ -242,10 +242,10 @@ function isSecret(arg) {
 
 // Does the git subcommand show file content (and not only names or statistics)?
 function showsContent(sub, r) {
-  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|--dd|--remerge-diff|--diff-merges|-c$|-m$|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
   if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
-  if (sub === "log") return patch;
+  if (sub === "log") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--oneline|--format|--pretty|--no-patch|-s$)/.test(x));
   return false;
 }
 
