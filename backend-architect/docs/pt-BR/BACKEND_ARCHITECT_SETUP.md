@@ -162,7 +162,9 @@ function dividir(s) {
 
 // Nome do programa: sem pasta, sem extensão do Windows, em minúsculas e sem versão no fim (python3.12 vira python).
 function nomeDe(p) {
-  const n = p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  const bruto = p.replace(/^.*[\\/]/, "").toLowerCase();
+  const n = bruto.replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  if (!n) negar("nome de programa vazio ou estranho");
   return n === "nodejs" ? "node" : n;
 }
 
@@ -174,6 +176,7 @@ function ehSegredo(arg) {
   const base = (x) => x.replace(/^.*[\\/]/, "");
   const candidatos = [base(m).split(":")[0]];
   if (m.includes(":")) candidatos.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes(":")) candidatos.push(base(m.slice(m.lastIndexOf(":") + 1)));
   if (m.includes("=")) candidatos.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
   return candidatos.some((c0) => {
     const c = c0.replace(/[. ]+$/, "");
@@ -247,12 +250,22 @@ function verificarOpcoes(args, perigosas) {
 
 // O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
 function mostraConteudo(sub, r) {
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
-  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
+  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
+  if (sub === "log") return patch;
   return false;
 }
 
+// Curinga ou pathspec especial do git (':(glob)', ':!') escolhe arquivos sem dar o nome; em comando que mostra
+// conteúdo, isso abriria um segredo sem que o nome .env apareça.
+// Excluir um segredo (':(exclude).env', ':!.env') é o uso seguro e passa.
+const pathspecEsperto = (x) => {
+  if (x.startsWith("-")) return false;
+  const exclui = /^:(\(exclude\)|!|\^)(.+)$/.exec(x);
+  if (exclui) return !ehSegredo(exclui[2]);
+  return /[*?[]/.test(x) || /^:[(/]/.test(x);
+};
 function verificarGit(a) {
   let i = 0;
   while (i < a.length && a[i].startsWith("-")) {
@@ -277,15 +290,19 @@ function verificarGit(a) {
   verificarOpcoes(r, GIT_PERIGOSAS);
   if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) negar("opção que executa ou grava");
   if (mostraConteudo(sub, r) && r.some(ehSegredo)) negar("leitura de arquivo de segredo");
+  if (mostraConteudo(sub, r) && r.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
+  if (sub === "grep" && r.some((x) => /^--(no-index|untracked|no-exclude-standard)/.test(x))) negar("git grep fora dos arquivos versionados (pode ler segredo)");
 }
 
 // O pacote está no node_modules/.bin desta pasta ou de uma pasta acima?
+// Pacote com escopo (@escopo/nome) só vale se esse pacote exato estiver instalado; sem escopo, basta o .bin.
 function binLocal(pacote) {
-  const bin = pacote.replace(/^@[^/]+\//, "");
-  if (!/^[\w.-]+$/.test(bin)) return false;
+  const escopo = pacote.startsWith("@");
+  if (escopo ? !/^@[\w.-]+\/[\w.-]+$/.test(pacote) : !/^[\w.-]+$/.test(pacote)) return false;
   let d = CWD;
   for (let k = 0; k < 40; k++) {
-    for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", bin + ext))) return true;
+    if (escopo && existsSync(join(d, "node_modules", ...pacote.split("/"), "package.json"))) return true;
+    if (!escopo) for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", pacote + ext))) return true;
     const pai = dirname(d);
     if (pai === d) break;
     d = pai;
@@ -295,7 +312,7 @@ function binLocal(pacote) {
 
 // npx, bunx, npm exec, bun x (podem baixar) e pnpm exec, yarn exec (só local): confere o pacote e o comando de dentro.
 function verificarExecutor(a, soLocal) {
-  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) negar("execução de pacote baixado na hora ou de comando embutido");
+  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) negar("execução de pacote baixado na hora ou de comando embutido");
   const semInstalar = a.some((x) => x === "--no" || x === "--no-install");
   const i = a.findIndex((x) => !x.startsWith("-"));
   if (i < 0) return;
@@ -319,7 +336,11 @@ function verificarGerenciador(prog, a) {
     if (prog === "yarn" && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) negar("instalação ou publicação de pacote");
     return;
   }
-  if (sub === "exec" || (sub === "x" && prog !== "yarn")) return verificarExecutor(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  if (sub === "exec" || (sub === "x" && prog !== "yarn")) {
+    // opção de baixar ou de comando embutido pode vir antes do subcomando (npm --yes exec x)
+    if (a.slice(0, i).some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) negar("execução de pacote baixado na hora ou de comando embutido");
+    return verificarExecutor(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  }
   const pal = palavrasAte(a, RODA_SCRIPT);
   if (pal.some((x) => PACOTE_PROIBIDO.has(x))) negar("instalação, publicação de pacote ou conta no registro");
   if (pal.includes("audit") && pal.includes("fix")) negar("instalação ou publicação de pacote");
@@ -408,7 +429,7 @@ hooks:
 
 No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/architect-bash-guard.mjs`).
 
-Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, versão no nome (`python3.12`), opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio. No git só passam subcomandos de leitura, e nenhum que mostre o conteúdo de um arquivo de segredo (`git show HEAD:.env`). O `npx` (e `npm exec`, `bunx`) só roda pacote que já está no `node_modules/.bin` do projeto, ou com `--no`: sem terminal, o npx baixaria o pacote sem perguntar. Qualquer erro dentro do script nega o comando. Testado com 220 comandos fictícios (58 liberados, 162 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
+Efeito: commit, push, instalação e migração passam a ser pedidos ao usuário ou ao Claude principal. O script divide o comando como o bash faria e recusa o que o bash expandiria, então aspas, caminho do programa, versão no nome (`python3.12`), opção global do git e código na linha (`node -e`, `python -c`) não servem de desvio. No git só passam subcomandos de leitura, e nenhum que mostre o conteúdo de um arquivo de segredo (`git show HEAD:.env`). O `npx` (e `npm exec`, `bunx`) só roda pacote que já está no `node_modules/.bin` do projeto, ou com `--no`: sem terminal, o npx baixaria o pacote sem perguntar. Qualquer erro dentro do script nega o comando. Pacote com escopo (`@escopo/nome`) precisa estar instalado com esse nome exato, e `--yes` antes do subcomando (`npm --yes exec`) também é barrado. Limite do segredo: um segredo já versionado aparece em qualquer `git show <commit>` ou `git log -p` que o altere, porque o agente precisa ler diffs para trabalhar; o hook barra só o pedido pelo nome, com curinga ou com pathspec especial. A defesa é não versionar segredo (o agente aponta quando acha) e a regra de nunca reproduzir valor. Testado com 238 comandos fictícios (61 liberados, 177 barrados) e 6 entradas inválidas (todas negadas), sem executar nenhum. Lista do que não pode não é fronteira: um programa chamado por outro nome escapa; as regras da seção 5.1 e a revisão do diff continuam valendo.
 
 ## 6. Como invocar
 

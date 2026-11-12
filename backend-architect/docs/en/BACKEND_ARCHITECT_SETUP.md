@@ -162,7 +162,9 @@ function split(s) {
 
 // Program name: without folder, without Windows extension, in lowercase and without a trailing version (python3.12 becomes python).
 function nameOf(p) {
-  const n = p.replace(/^.*[\\/]/, "").toLowerCase().replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  const raw = p.replace(/^.*[\\/]/, "").toLowerCase();
+  const n = raw.replace(/\.(exe|cmd|bat|ps1|sh)$/, "").replace(/\d+(\.\d+)*$/, "").replace(/[-_.]$/, "");
+  if (!n) deny("empty or odd program name");
   return n === "nodejs" ? "node" : n;
 }
 
@@ -174,6 +176,7 @@ function isSecret(arg) {
   const base = (x) => x.replace(/^.*[\\/]/, "");
   const candidates = [base(m).split(":")[0]];
   if (m.includes(":")) candidates.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes(":")) candidates.push(base(m.slice(m.lastIndexOf(":") + 1)));
   if (m.includes("=")) candidates.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
   return candidates.some((c0) => {
     const c = c0.replace(/[. ]+$/, "");
@@ -247,12 +250,22 @@ function checkOptions(args, dangerous) {
 
 // Does the git subcommand show file content (and not only names or statistics)?
 function showsContent(sub, r) {
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
-  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
+  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
+  if (sub === "log") return patch;
   return false;
 }
 
+// A git glob or special pathspec (':(glob)', ':!') picks files without naming them; in a command that shows
+// content, that would open a secret without the name .env appearing.
+// Excluding a secret (':(exclude).env', ':!.env') is the safe use and passes.
+const isTrickyPathspec = (x) => {
+  if (x.startsWith("-")) return false;
+  const excluded = /^:(\(exclude\)|!|\^)(.+)$/.exec(x);
+  if (excluded) return !isSecret(excluded[2]);
+  return /[*?[]/.test(x) || /^:[(/]/.test(x);
+};
 function checkGit(a) {
   let i = 0;
   while (i < a.length && a[i].startsWith("-")) {
@@ -277,15 +290,19 @@ function checkGit(a) {
   checkOptions(r, GIT_DANGEROUS);
   if (sub === "grep" && r.some((x) => /^-[A-Za-z]*O/.test(x))) deny("option that executes or writes");
   if (showsContent(sub, r) && r.some(isSecret)) deny("reading a secret file");
+  if (showsContent(sub, r) && r.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
+  if (sub === "grep" && r.some((x) => /^--(no-index|untracked|no-exclude-standard)/.test(x))) deny("git grep outside tracked files (may read a secret)");
 }
 
 // Is the package in node_modules/.bin of this folder or of a folder above?
+// A scoped package (@scope/name) only counts if that exact package is installed; without a scope, the .bin is enough.
 function localBin(pkg) {
-  const bin = pkg.replace(/^@[^/]+\//, "");
-  if (!/^[\w.-]+$/.test(bin)) return false;
+  const scoped = pkg.startsWith("@");
+  if (scoped ? !/^@[\w.-]+\/[\w.-]+$/.test(pkg) : !/^[\w.-]+$/.test(pkg)) return false;
   let d = CWD;
   for (let k = 0; k < 40; k++) {
-    for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", bin + ext))) return true;
+    if (scoped && existsSync(join(d, "node_modules", ...pkg.split("/"), "package.json"))) return true;
+    if (!scoped) for (const ext of ["", ".cmd", ".exe", ".ps1"]) if (existsSync(join(d, "node_modules", ".bin", pkg + ext))) return true;
     const parent = dirname(d);
     if (parent === d) break;
     d = parent;
@@ -295,7 +312,7 @@ function localBin(pkg) {
 
 // npx, bunx, npm exec, bun x (may download) and pnpm exec, yarn exec (local only): checks the package and the inner command.
 function checkRunner(a, localOnly) {
-  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+  if (a.some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
   const noInstall = a.some((x) => x === "--no" || x === "--no-install");
   const i = a.findIndex((x) => !x.startsWith("-"));
   if (i < 0) return;
@@ -319,7 +336,11 @@ function checkManager(prog, a) {
     if (prog === "yarn" && !a.some((x) => /^(-v|--version|-h|--help)$/.test(x))) deny("package install or publish");
     return;
   }
-  if (sub === "exec" || (sub === "x" && prog !== "yarn")) return checkRunner(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  if (sub === "exec" || (sub === "x" && prog !== "yarn")) {
+    // a download or embedded-command option can come before the subcommand (npm --yes exec x)
+    if (a.slice(0, i).some((x) => /^(-y|--yes|-p|--package|-c|--call)$|^--(package|call|yes)=/.test(x))) deny("running a package downloaded on the fly or an embedded command");
+    return checkRunner(a.slice(i + 1), prog === "pnpm" || prog === "yarn");
+  }
   const w = wordsUntil(a, RUNS_SCRIPT);
   if (w.some((x) => PACKAGE_DENIED.has(x))) deny("package install or publish, or registry account");
   if (w.includes("audit") && w.includes("fix")) deny("package install or publish");
@@ -408,7 +429,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/architect-bash-guard.mjs`).
 
-Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. Tested with 220 fictitious commands (58 allowed, 162 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
+Effect: commit, push, install and migration become requests to the user or the main Claude. The script splits the command the way bash would and refuses whatever bash would expand, so quotes, the program's path, a version in the name (`python3.12`), a git global option and inline code (`node -e`, `python -c`) do not work as a bypass. In git only read-only subcommands pass, and none that shows the content of a secret file (`git show HEAD:.env`). `npx` (and `npm exec`, `bunx`) only runs a package that is already in the project's `node_modules/.bin`, or with `--no`: without a terminal, npx would download the package without asking. Any error inside the script denies the command. A scoped package (`@scope/name`) must be installed under that exact name, and `--yes` before the subcommand (`npm --yes exec`) is denied too. Secret limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. Tested with 238 fictitious commands (61 allowed, 177 denied) and 6 invalid inputs (all denied), without running any of them. A list of what is not allowed is not a boundary: a program called by another name escapes; the rules in section 5.1 and reviewing the diff still apply.
 
 ## 6. How to invoke
 

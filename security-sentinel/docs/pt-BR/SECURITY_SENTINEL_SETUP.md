@@ -203,6 +203,7 @@ function ehSegredo(arg) {
   const base = (x) => x.replace(/^.*[\\/]/, "");
   const candidatos = [base(m).split(":")[0]];
   if (m.includes(":")) candidatos.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes(":")) candidatos.push(base(m.slice(m.lastIndexOf(":") + 1)));
   if (m.includes("=")) candidatos.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
   return candidatos.some((c0) => {
     const c = c0.replace(/[. ]+$/, "");
@@ -216,12 +217,22 @@ function ehSegredo(arg) {
 
 // O subcomando do git mostra conteúdo de arquivo (e não só nomes ou estatística)?
 function mostraConteudo(sub, r) {
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
-  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
+  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
+  if (sub === "log") return patch;
   return false;
 }
 
+// Curinga ou pathspec especial do git (':(glob)', ':!') escolhe arquivos sem dar o nome; em comando que mostra
+// conteúdo, isso abriria um segredo sem que o nome .env apareça.
+// Excluir um segredo (':(exclude).env', ':!.env') é o uso seguro e passa.
+const pathspecEsperto = (x) => {
+  if (x.startsWith("-")) return false;
+  const exclui = /^:(\(exclude\)|!|\^)(.+)$/.exec(x);
+  if (exclui) return !ehSegredo(exclui[2]);
+  return /[*?[]/.test(x) || /^:[(/]/.test(x);
+};
 function validar(args) {
   const [prog, ...a] = args;
   if (prog === "git") {
@@ -235,6 +246,7 @@ function validar(args) {
     if (!ok) negar("fora da lista de leitura");
     verificarOpcoes(resto, GIT_PERIGOSAS);
     if (mostraConteudo(sub, resto) && resto.some(ehSegredo)) negar("leitura de arquivo de segredo");
+    if (mostraConteudo(sub, resto) && resto.some(pathspecEsperto)) negar("curinga ou pathspec especial em comando que mostra conteúdo");
     return;
   }
   if (prog === "ls") {
@@ -278,7 +290,7 @@ hooks:
 
 No Windows, se `~` não for expandido pelo shell do hook, use o caminho absoluto (`node C:/Users/<você>/.claude/hooks/sentinel-bash-guard.mjs`).
 
-Efeito: o agente perde a capacidade de rodar scanners (só `--version` passa). O script divide o comando como o bash faria e recusa o que o bash expandiria (`$`, crase, glob e barra invertida fora de aspas); a checagem roda sobre os argumentos reais, inclusive opções abreviadas, e qualquer erro dentro dele nega o comando. Quando quiser um scanner, rode você mesmo, ou peça ao Claude principal, com o comando que o agente sugerir, e entregue a saída ao agente.
+Efeito: o agente perde a capacidade de rodar scanners (só `--version` passa). O script divide o comando como o bash faria e recusa o que o bash expandiria (`$`, crase, glob e barra invertida fora de aspas); a checagem roda sobre os argumentos reais, inclusive opções abreviadas, e qualquer erro dentro dele nega o comando. Limite: um segredo já versionado aparece em qualquer `git show <commit>` ou `git log -p` que o altere, porque o agente precisa ler diffs para trabalhar; o hook barra só o pedido pelo nome, com curinga ou com pathspec especial. A defesa é não versionar segredo (o agente aponta quando acha) e a regra de nunca reproduzir valor. Quando quiser um scanner, rode você mesmo, ou peça ao Claude principal, com o comando que o agente sugerir, e entregue a saída ao agente.
 
 ### 5.3 Isolamento para repositório não confiável
 

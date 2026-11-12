@@ -203,6 +203,7 @@ function isSecret(arg) {
   const base = (x) => x.replace(/^.*[\\/]/, "");
   const candidates = [base(m).split(":")[0]];
   if (m.includes(":")) candidates.push(base(m.slice(m.indexOf(":") + 1)));
+  if (m.includes(":")) candidates.push(base(m.slice(m.lastIndexOf(":") + 1)));
   if (m.includes("=")) candidates.push(base(m.slice(m.lastIndexOf("=") + 1)).split(":")[0]);
   return candidates.some((c0) => {
     const c = c0.replace(/[. ]+$/, "");
@@ -216,12 +217,22 @@ function isSecret(arg) {
 
 // Does the git subcommand show file content (and not only names or statistics)?
 function showsContent(sub, r) {
+  const patch = r.some((x) => /^(-p|-u|--patch|--cc|-U\d*$|--unified|--word-diff|--color-words|--binary|--full-diff|-L)/.test(x));
   if (["blame", "cat-file", "grep"].includes(sub)) return true;
-  if (sub === "show" || sub === "diff") return !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--no-patch|-s$|--quiet|--exit-code)/.test(x));
-  if (sub === "log") return r.some((x) => /^(-p|-u|--patch|--cc|--word-diff|-U\d*$|-L|--full-diff)/.test(x));
+  if (sub === "show" || sub === "diff") return patch || !r.some((x) => /^(--stat|--name-only|--name-status|--numstat|--shortstat|--summary|--dirstat|--raw|--no-patch|-s$|--quiet)/.test(x));
+  if (sub === "log") return patch;
   return false;
 }
 
+// A git glob or special pathspec (':(glob)', ':!') picks files without naming them; in a command that shows
+// content, that would open a secret without the name .env appearing.
+// Excluding a secret (':(exclude).env', ':!.env') is the safe use and passes.
+const isTrickyPathspec = (x) => {
+  if (x.startsWith("-")) return false;
+  const excluded = /^:(\(exclude\)|!|\^)(.+)$/.exec(x);
+  if (excluded) return !isSecret(excluded[2]);
+  return /[*?[]/.test(x) || /^:[(/]/.test(x);
+};
 function validate(args) {
   const [prog, ...a] = args;
   if (prog === "git") {
@@ -235,6 +246,7 @@ function validate(args) {
     if (!ok) deny("not on the read-only list");
     checkOptions(rest, GIT_DANGEROUS);
     if (showsContent(sub, rest) && rest.some(isSecret)) deny("reading a secret file");
+    if (showsContent(sub, rest) && rest.some(isTrickyPathspec)) deny("glob or special pathspec in a command that shows content");
     return;
   }
   if (prog === "ls") {
@@ -278,7 +290,7 @@ hooks:
 
 On Windows, if `~` is not expanded by the hook's shell, use the absolute path (`node C:/Users/<you>/.claude/hooks/sentinel-bash-guard.mjs`).
 
-Effect: the agent loses the ability to run scanners (only `--version` passes). The script splits the command the way bash would and refuses whatever bash would expand (`$`, backtick, globs and backslash outside quotes); the check runs on the real arguments, abbreviated options included, and any error inside it denies the command. When you want a scanner, run it yourself, or ask the main Claude to, with the command the agent suggests, and hand the output to the agent.
+Effect: the agent loses the ability to run scanners (only `--version` passes). The script splits the command the way bash would and refuses whatever bash would expand (`$`, backtick, globs and backslash outside quotes); the check runs on the real arguments, abbreviated options included, and any error inside it denies the command. Limit: a secret that is already committed shows up in any `git show <commit>` or `git log -p` that changes it, because the agent needs to read diffs to do its job; the hook only denies asking for it by name, with a glob or with a special pathspec. The defense is not committing secrets (the agent flags it when it finds one) and the rule of never reproducing a value. When you want a scanner, run it yourself, or ask the main Claude to, with the command the agent suggests, and hand the output to the agent.
 
 ### 5.3 Isolation for an untrusted repository
 
